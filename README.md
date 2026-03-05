@@ -1,8 +1,10 @@
-# VGDLax
+# VGDLx
+
+*Pronounced "VG-deluxe"*
 
 A JAX-compiled [VGDL](http://www.intfiction.org/forum/viewtopic.php?f=11&t=6497) (Video Game Description Language) engine for GPU-accelerated batched reinforcement learning.
 
-VGDLax ports [py-vgdl](https://github.com/schaul/py-vgdl) to JAX, replacing OOP sprites with entity arrays and pygame collision with grid/AABB overlap detection. The result is a fully `jit`-able and `vmap`-able game step function that runs thousands of environments in parallel.
+VGDLx ports [py-vgdl](https://github.com/schaul/py-vgdl) to JAX, replacing OOP sprites with entity arrays and pygame collision with grid/AABB overlap detection. The result is a fully `jit`-able and `vmap`-able game step function that runs thousands of environments in parallel.
 
 ## Features
 
@@ -95,8 +97,7 @@ Steps/second on CPU (Apple M1, 256 parallel environments):
 
 ## Documentation
 
-- [`tests/MECHANICS_DIFF.md`](tests/MECHANICS_DIFF.md) — Known behavioral differences vs py-vgdl (A1–A9)
-- [`tests/FEATURE_PARITY.md`](tests/FEATURE_PARITY.md) — Feature coverage and cross-engine validation results
+- [`tests/MECHANICS_DIFF.md`](tests/MECHANICS_DIFF.md) — Three-way engine comparison (VGDL 1.0 · 2.0 · VGDLx): 18 divergences, validation results, feature coverage
 
 ## VGDL Game Format
 
