@@ -4,70 +4,25 @@ Reads .txt game files and level files, produces a GameDef.
 """
 from collections import defaultdict
 from vgdl_jax.data_model import (
-    SpriteClass, TerminationType, STATIC_CLASSES,
+    SpriteClass, TerminationType, STATIC_CLASSES, SPRITE_REGISTRY,
     SpriteDef, EffectDef, TerminationDef, LevelDef, GameDef,
 )
 from vgdl_jax.effects import VGDL_TO_KEY
 
 
-# ── Class name → SpriteClass mapping ──────────────────────────────────
+# ── Derived from SPRITE_REGISTRY ──────────────────────────────────────
 
+# VGDL class name → SpriteClass enum
 CLASS_MAP = {
-    'Immovable': SpriteClass.IMMOVABLE,
-    'Immutable': SpriteClass.IMMOVABLE,
-    'Passive': SpriteClass.PASSIVE,
-    'ResourcePack': SpriteClass.RESOURCE,
-    'Resource': SpriteClass.RESOURCE,
-    'Missile': SpriteClass.MISSILE,
-    'RandomNPC': SpriteClass.RANDOM_NPC,
-    'Chaser': SpriteClass.CHASER,
-    'AStarChaser': SpriteClass.CHASER,
-    'Fleeing': SpriteClass.FLEEING,
-    'Flicker': SpriteClass.FLICKER,
-    'OrientedFlicker': SpriteClass.ORIENTED_FLICKER,
-    'SpawnPoint': SpriteClass.SPAWN_POINT,
-    'Bomber': SpriteClass.BOMBER,
-    'Walker': SpriteClass.WALKER,
-    'Portal': SpriteClass.PORTAL,
-    'Conveyor': SpriteClass.CONVEYOR,
-    'ErraticMissile': SpriteClass.ERRATIC_MISSILE,
-    'RandomInertial': SpriteClass.RANDOM_INERTIAL,
-    'RandomMissile': SpriteClass.RANDOM_MISSILE,
-    'MovingAvatar': SpriteClass.MOVING_AVATAR,
-    'FlakAvatar': SpriteClass.FLAK_AVATAR,
-    'ShootAvatar': SpriteClass.SHOOT_AVATAR,
-    'HorizontalAvatar': SpriteClass.HORIZONTAL_AVATAR,
-    'VerticalAvatar': SpriteClass.VERTICAL_AVATAR,
-    'OrientedAvatar': SpriteClass.ORIENTED_AVATAR,
-    'RotatingAvatar': SpriteClass.ROTATING_AVATAR,
-    'RotatingFlippingAvatar': SpriteClass.ROTATING_FLIPPING_AVATAR,
-    'NoisyRotatingFlippingAvatar': SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR,
-    'ShootEverywhereAvatar': SpriteClass.SHOOT_EVERYWHERE_AVATAR,
-    'AimedAvatar': SpriteClass.AIMED_AVATAR,
-    'AimedFlakAvatar': SpriteClass.AIMED_FLAK_AVATAR,
-    'Spreader': SpriteClass.SPREADER,
-    'WalkJumper': SpriteClass.WALK_JUMPER,
-    'InertialAvatar': SpriteClass.INERTIAL_AVATAR,
-    'MarioAvatar': SpriteClass.MARIO_AVATAR,
+    name: sc
+    for sc, d in SPRITE_REGISTRY.items()
+    for name in d.vgdl_names
 }
 
 # Sprite classes that default to speed=1 in py-vgdl
-SPEED_1_CLASSES = {
-    SpriteClass.MOVING_AVATAR, SpriteClass.ORIENTED_AVATAR,
-    SpriteClass.HORIZONTAL_AVATAR, SpriteClass.FLAK_AVATAR,
-    SpriteClass.SHOOT_AVATAR, SpriteClass.RANDOM_NPC,
-    SpriteClass.CHASER, SpriteClass.FLEEING,
-    SpriteClass.MISSILE, SpriteClass.WALKER, SpriteClass.BOMBER,
-    SpriteClass.ERRATIC_MISSILE, SpriteClass.RANDOM_INERTIAL,
-    SpriteClass.RANDOM_MISSILE,
-    SpriteClass.INERTIAL_AVATAR, SpriteClass.MARIO_AVATAR,
-    SpriteClass.VERTICAL_AVATAR, SpriteClass.ROTATING_AVATAR,
-    SpriteClass.ROTATING_FLIPPING_AVATAR,
-    SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR,
-    SpriteClass.SHOOT_EVERYWHERE_AVATAR,
-    SpriteClass.AIMED_AVATAR, SpriteClass.AIMED_FLAK_AVATAR,
-    SpriteClass.WALK_JUMPER,
-}
+SPEED_1_CLASSES = frozenset(
+    sc for sc, d in SPRITE_REGISTRY.items() if d.default_speed > 0
+)
 
 
 # py-vgdl uses Vector2(x, y) with screen coords: UP=(0,-1), DOWN=(0,1)

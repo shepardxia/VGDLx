@@ -15,23 +15,6 @@ NOISY_AVATAR_NOISE_LEVEL = 0.4      # NoisyRotatingFlippingAvatar noise probabil
 GRAVITY_ACCEL = 1.0 / PHYSICS_SCALE  # standard gravity in grid-cell units
 SPRITE_HEADROOM = 10                 # extra slots per type beyond level count
 
-# Effects that modify sprite positions (used to determine occupancy-grid cache
-# safety in step.py and chaser-target stability in compiler.py).
-POSITION_MODIFYING_EFFECTS = frozenset({
-    'step_back', 'wall_stop', 'wall_bounce', 'bounce_direction',
-    'bounce_forward', 'pull_with_it', 'wrap_around', 'teleport_to_exit',
-    'convey_sprite', 'wind_gust', 'slip_forward', 'undo_all', 'turn_around',
-})
-
-# Effects that require per-pair partner identity (partner_idx) from collision.
-# All other effects use only the boolean collision mask.
-PARTNER_IDX_EFFECTS = frozenset({
-    'kill_both', 'kill_if_from_above',
-    'kill_if_other_has_more', 'kill_if_other_has_less',
-    'collect_resource', 'convey_sprite', 'wind_gust', 'attract_gaze',
-    'bounce_forward', 'pull_with_it',
-})
-
 
 class SpriteClass(enum.IntEnum):
     IMMOVABLE = 0
@@ -78,25 +61,203 @@ class TerminationType(enum.IntEnum):
     RESOURCE_COUNTER = 3
 
 
-# Sprite classes that never move and should be skipped in NPC update
-STATIC_CLASSES = {
-    SpriteClass.IMMOVABLE, SpriteClass.PASSIVE,
-    SpriteClass.RESOURCE, SpriteClass.PORTAL,
-    SpriteClass.CONVEYOR,
+@dataclass(frozen=True)
+class SpriteClassDef:
+    vgdl_names: tuple               # VGDL parser names, e.g. ('Missile',)
+    is_static: bool = False
+    is_avatar: bool = False
+    default_speed: float = 0.0      # 0.0 = stationary default, 1.0 = speed-1
+    is_moving_npc: bool = False     # participates in NPC update loop
+    # Avatar properties
+    n_move_actions: int = 0
+    can_shoot: bool = False
+    is_horizontal: bool = False
+    physics_type: str = 'grid'
+    is_rotating: bool = False
+    is_flipping: bool = False
+    noise_level: float = 0.0
+    shoot_everywhere: bool = False
+    is_aimed: bool = False
+    can_move_aimed: bool = False
+
+
+# ---------------------------------------------------------------------------
+# SPRITE_REGISTRY: single source of truth for per-SpriteClass metadata.
+# Maps SpriteClass → SpriteClassDef.
+# ---------------------------------------------------------------------------
+SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
+    # --- Static / non-moving sprite classes ---
+    SpriteClass.IMMOVABLE: SpriteClassDef(
+        vgdl_names=('Immovable', 'Immutable'),
+        is_static=True,
+    ),
+    SpriteClass.PASSIVE: SpriteClassDef(
+        vgdl_names=('Passive',),
+        is_static=True,
+    ),
+    SpriteClass.RESOURCE: SpriteClassDef(
+        vgdl_names=('ResourcePack', 'Resource'),
+        is_static=True,
+    ),
+    SpriteClass.PORTAL: SpriteClassDef(
+        vgdl_names=('Portal',),
+        is_static=True,
+    ),
+    SpriteClass.CONVEYOR: SpriteClassDef(
+        vgdl_names=('Conveyor',),
+        is_static=True,
+    ),
+
+    # --- Moving NPC classes (speed defaults to 1.0) ---
+    SpriteClass.MISSILE: SpriteClassDef(
+        vgdl_names=('Missile',),
+        default_speed=1.0,
+        is_moving_npc=True,
+    ),
+    SpriteClass.RANDOM_NPC: SpriteClassDef(
+        vgdl_names=('RandomNPC',),
+        default_speed=1.0,
+        is_moving_npc=True,
+    ),
+    SpriteClass.CHASER: SpriteClassDef(
+        vgdl_names=('Chaser', 'AStarChaser'),
+        default_speed=1.0,
+        is_moving_npc=True,
+    ),
+    SpriteClass.FLEEING: SpriteClassDef(
+        vgdl_names=('Fleeing',),
+        default_speed=1.0,
+        is_moving_npc=True,
+    ),
+    SpriteClass.FLICKER: SpriteClassDef(
+        vgdl_names=('Flicker',),
+    ),
+    SpriteClass.ORIENTED_FLICKER: SpriteClassDef(
+        vgdl_names=('OrientedFlicker',),
+    ),
+    SpriteClass.SPAWN_POINT: SpriteClassDef(
+        vgdl_names=('SpawnPoint',),
+    ),
+    SpriteClass.BOMBER: SpriteClassDef(
+        vgdl_names=('Bomber',),
+        default_speed=1.0,
+        is_moving_npc=True,
+    ),
+    SpriteClass.WALKER: SpriteClassDef(
+        vgdl_names=('Walker',),
+        default_speed=1.0,
+        is_moving_npc=True,
+    ),
+    SpriteClass.ERRATIC_MISSILE: SpriteClassDef(
+        vgdl_names=('ErraticMissile',),
+        default_speed=1.0,
+        is_moving_npc=True,
+    ),
+    SpriteClass.RANDOM_INERTIAL: SpriteClassDef(
+        vgdl_names=('RandomInertial',),
+        default_speed=1.0,
+        is_moving_npc=True,
+        physics_type='continuous',
+    ),
+    SpriteClass.RANDOM_MISSILE: SpriteClassDef(
+        vgdl_names=('RandomMissile',),
+        default_speed=1.0,
+        is_moving_npc=True,
+    ),
+    SpriteClass.SPREADER: SpriteClassDef(
+        vgdl_names=('Spreader',),
+    ),
+    SpriteClass.WALK_JUMPER: SpriteClassDef(
+        vgdl_names=('WalkJumper',),
+        default_speed=1.0,
+        is_moving_npc=True,
+        physics_type='gravity',
+    ),
+
+    # --- Avatar classes ---
+    SpriteClass.MOVING_AVATAR: SpriteClassDef(
+        vgdl_names=('MovingAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=4,
+    ),
+    SpriteClass.FLAK_AVATAR: SpriteClassDef(
+        vgdl_names=('FlakAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=2, can_shoot=True, is_horizontal=True,
+    ),
+    SpriteClass.SHOOT_AVATAR: SpriteClassDef(
+        vgdl_names=('ShootAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=4, can_shoot=True,
+    ),
+    SpriteClass.HORIZONTAL_AVATAR: SpriteClassDef(
+        vgdl_names=('HorizontalAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=2, is_horizontal=True,
+    ),
+    SpriteClass.ORIENTED_AVATAR: SpriteClassDef(
+        vgdl_names=('OrientedAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=4,
+    ),
+    SpriteClass.VERTICAL_AVATAR: SpriteClassDef(
+        vgdl_names=('VerticalAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=2,
+    ),
+    SpriteClass.INERTIAL_AVATAR: SpriteClassDef(
+        vgdl_names=('InertialAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=4, physics_type='continuous',
+    ),
+    SpriteClass.MARIO_AVATAR: SpriteClassDef(
+        vgdl_names=('MarioAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=5, physics_type='gravity',
+    ),
+    SpriteClass.ROTATING_AVATAR: SpriteClassDef(
+        vgdl_names=('RotatingAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=4, is_rotating=True,
+    ),
+    SpriteClass.ROTATING_FLIPPING_AVATAR: SpriteClassDef(
+        vgdl_names=('RotatingFlippingAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=4, is_rotating=True, is_flipping=True,
+    ),
+    SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR: SpriteClassDef(
+        vgdl_names=('NoisyRotatingFlippingAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=4, is_rotating=True, is_flipping=True,
+        noise_level=NOISY_AVATAR_NOISE_LEVEL,
+    ),
+    SpriteClass.SHOOT_EVERYWHERE_AVATAR: SpriteClassDef(
+        vgdl_names=('ShootEverywhereAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=4, can_shoot=True, shoot_everywhere=True,
+    ),
+    SpriteClass.AIMED_AVATAR: SpriteClassDef(
+        vgdl_names=('AimedAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=2, can_shoot=True, is_aimed=True,
+    ),
+    SpriteClass.AIMED_FLAK_AVATAR: SpriteClassDef(
+        vgdl_names=('AimedFlakAvatar',),
+        is_avatar=True, default_speed=1.0,
+        n_move_actions=4, can_shoot=True, is_aimed=True, can_move_aimed=True,
+    ),
 }
 
-# Avatar classes handled by _update_avatar (not NPC update)
-AVATAR_CLASSES = {
-    SpriteClass.MOVING_AVATAR, SpriteClass.FLAK_AVATAR,
-    SpriteClass.SHOOT_AVATAR, SpriteClass.HORIZONTAL_AVATAR,
-    SpriteClass.ORIENTED_AVATAR,
-    SpriteClass.INERTIAL_AVATAR, SpriteClass.MARIO_AVATAR,
-    SpriteClass.VERTICAL_AVATAR,
-    SpriteClass.ROTATING_AVATAR, SpriteClass.ROTATING_FLIPPING_AVATAR,
-    SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR,
-    SpriteClass.SHOOT_EVERYWHERE_AVATAR,
-    SpriteClass.AIMED_AVATAR, SpriteClass.AIMED_FLAK_AVATAR,
-}
+# Derived sets — computed from SPRITE_REGISTRY
+STATIC_CLASSES = frozenset(
+    sc for sc, d in SPRITE_REGISTRY.items() if d.is_static
+)
+AVATAR_CLASSES = frozenset(
+    sc for sc, d in SPRITE_REGISTRY.items() if d.is_avatar
+)
+MOVING_NPC_CLASSES = frozenset(
+    sc for sc, d in SPRITE_REGISTRY.items() if d.is_moving_npc
+)
 
 
 @dataclass

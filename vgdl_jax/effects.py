@@ -17,8 +17,38 @@ Sections:
 """
 import jax
 import jax.numpy as jnp
+from dataclasses import dataclass
+from typing import Optional, Callable
 from vgdl_jax.collision import in_bounds, AABB_EPS
+from vgdl_jax.data_model import DEFAULT_RESOURCE_LIMIT
 from vgdl_jax.sprites import DIRECTION_DELTAS, prefix_sum_allocate
+
+
+@dataclass(frozen=True)
+class EffectEntry:
+    handler: Callable
+    key: str
+    needs_partner: bool = False
+    modifies_position: bool = False
+    modifies_alive: bool = False
+    static_a_handler: Optional[Callable] = None
+    compile_kwargs: Optional[Callable] = None  # fn(ed, ctx) → kwargs dict
+
+class CompileContext:
+    """Bundle of compile-time context passed to per-effect compile functions."""
+    __slots__ = ('game_def', 'resource_name_to_idx', 'resource_limits',
+                 'avatar_type_idx', 'concrete_actor_idx', 'concrete_actee_idx',
+                 'resolve_first')
+    def __init__(self, game_def, resource_name_to_idx, resource_limits,
+                 avatar_type_idx, concrete_actor_idx=None, concrete_actee_idx=None,
+                 resolve_first=None):
+        self.game_def = game_def
+        self.resource_name_to_idx = resource_name_to_idx
+        self.resource_limits = resource_limits
+        self.avatar_type_idx = avatar_type_idx
+        self.concrete_actor_idx = concrete_actor_idx
+        self.concrete_actee_idx = concrete_actee_idx
+        self.resolve_first = resolve_first or (lambda gd, st, d=None: d)
 
 
 # ── JAX Primitives ───────────────────────────────────────────────────
@@ -99,7 +129,8 @@ def _nearest_partner(pos_a, state, type_b, eff_b):
 
 
 def _fill_slots(state, target_type, source_mask, src_positions,
-                src_orientations=None, target_speed=None, reset_cooldown=False):
+                src_orientations=None, target_speed=None, reset_cooldown=False,
+                src_resources=None):
     """Allocate dead slots in target_type and fill with source data."""
     should_fill, src_idx = prefix_sum_allocate(state.alive[target_type], source_mask)
     src_pos = src_positions[src_idx]
@@ -123,6 +154,11 @@ def _fill_slots(state, target_type, source_mask, src_positions,
         state = state.replace(
             cooldown_timers=state.cooldown_timers.at[target_type].set(
                 jnp.where(should_fill, 0, state.cooldown_timers[target_type])))
+    if src_resources is not None:
+        src_res = src_resources[src_idx]
+        state = state.replace(
+            resources=state.resources.at[target_type].set(
+                jnp.where(should_fill[:, None], src_res, state.resources[target_type])))
     return state
 
 
@@ -226,6 +262,17 @@ def kill_if_avatar_without_resource(state, type_a, mask, score_change, kwargs, *
     should_kill = mask & ~(state.resources[ati, 0, r_idx] > 0)
     return _with_score(prim_kill(state, type_a, should_kill),
                        should_kill.sum() * jnp.int32(score_change))
+
+
+def kill_if_alive(state, type_a, type_b, mask, score_change,
+                  partner_idx=None, **_):
+    """Kill sprite1 only if partner sprite2 is still alive."""
+    if partner_idx is not None and type_b >= 0:
+        partner_alive = state.alive[type_b][jnp.clip(partner_idx, 0, state.alive.shape[1] - 1)]
+        valid = partner_idx >= 0
+        mask = mask & partner_alive & valid
+    return _with_score(prim_kill(state, type_a, mask),
+                       mask.sum() * jnp.int32(score_change))
 
 
 # ── Position and orientation ───────────────────────────────────────────
@@ -350,7 +397,8 @@ def transform_to(state, type_a, mask, score_delta, kwargs, **_):
     state = _with_score(prim_kill(state, type_a, mask), score_delta)
     return _fill_slots(state, new_type, mask,
                        state.positions[type_a], state.orientations[type_a],
-                       target_speed=target_speed, reset_cooldown=True)
+                       target_speed=target_speed, reset_cooldown=True,
+                       src_resources=state.resources[type_a])
 
 
 def clone_sprite(state, type_a, mask, score_delta, kwargs=None, **_):
@@ -410,10 +458,19 @@ def teleport_to_exit(state, type_a, mask, score_delta, kwargs, **_):
         chosen_slots = jnp.argmax(matches, axis=1)  # [max_n]
         targets = exit_pos[chosen_slots]             # [max_n, 2]
 
+        # Copy exit portal orientation to teleported sprite (GVGAI behavior)
+        exit_ori = state.orientations[exit_type]
+        target_oris = exit_ori[chosen_slots]          # [max_n, 2]
+
         pos_a = state.positions[type_a]
-        new_pos = jnp.where(mask[:, None] & (n_exits > 0), targets, pos_a)
+        active = mask[:, None] & (n_exits > 0)
+        new_pos = jnp.where(active, targets, pos_a)
+        ori_a = state.orientations[type_a]
+        new_ori = jnp.where(active, target_oris, ori_a)
         return _with_score(state.replace(
-            positions=state.positions.at[type_a].set(new_pos), rng=rng), score_delta)
+            positions=state.positions.at[type_a].set(new_pos),
+            orientations=state.orientations.at[type_a].set(new_ori),
+            rng=rng), score_delta)
     return _with_score(state, score_delta)
 
 
@@ -689,57 +746,140 @@ def null(state, score_delta, **_):
     return _with_score(state, score_delta)
 
 
-# ── Dispatch ───────────────────────────────────────────────────────────
+# ── Compile-time kwargs ────────────────────────────────────────────
 
-# Single source of truth: VGDL name → (handler_fn, internal_key)
-EFFECT_REGISTRY = {
-    # Kill / removal
-    'killSprite':     (kill_sprite,     'kill_sprite'),
-    'killBoth':       (kill_both,       'kill_both'),
-    'killIfAlive':    (kill_sprite,     'kill_if_alive'),
-    'killIfSlow':     (kill_if_slow,    'kill_if_slow'),
-    'KillOthers':     (kill_others,     'kill_others'),
-    'killIfFromAbove': (kill_if_from_above, 'kill_if_from_above'),
-    # Position and orientation
-    'stepBack':          (step_back,          'step_back'),
-    'reverseDirection':  (reverse_direction,  'reverse_direction'),
-    'turnAround':        (turn_around,        'turn_around'),
-    'flipDirection':     (flip_direction,     'flip_direction'),
-    'undoAll':           (undo_all,           'undo_all'),
-    'wrapAround':        (wrap_around,        'wrap_around'),
-    'attractGaze':       (attract_gaze,       'attract_gaze'),
-    # Resources
-    'changeResource':       (change_resource,       'change_resource'),
-    'collectResource':      (collect_resource,      'collect_resource'),
-    'AvatarCollectResource': (avatar_collect_resource, 'avatar_collect_resource'),
-    'SpendResource':        (spend_resource,        'spend_resource'),
-    'SpendAvatarResource':  (spend_avatar_resource, 'spend_avatar_resource'),
-    'killIfHasLess':        (kill_if_has_less,      'kill_if_has_less'),
-    'killIfHasMore':        (kill_if_has_more,      'kill_if_has_more'),
-    'killIfOtherHasMore':   (kill_if_other_has_more,  'kill_if_other_has_more'),
-    'killIfOtherHasLess':   (kill_if_other_has_less,  'kill_if_other_has_less'),
-    'KillIfAvatarWithoutResource': (kill_if_avatar_without_resource, 'kill_if_avatar_without_resource'),
-    # Spawn and transform
-    'transformTo':       (transform_to,       'transform_to'),
-    'cloneSprite':       (clone_sprite,       'clone_sprite'),
-    'spawnIfHasMore':    (spawn_if_has_more,  'spawn_if_has_more'),
-    'TransformOthersTo': (transform_others_to, 'transform_others_to'),
-    # Movement and conveying
-    'teleportToExit':   (teleport_to_exit,   'teleport_to_exit'),
-    'conveySprite':     (convey_sprite,      'convey_sprite'),
-    'windGust':         (wind_gust,          'wind_gust'),
-    'slipForward':      (slip_forward,       'slip_forward'),
-    # Physics / wall interactions
-    'bounceForward':    (partner_delta,      'bounce_forward'),
-    'pullWithIt':       (partner_delta,      'pull_with_it'),
-    'wallStop':         (wall_stop,          'wall_stop'),
-    'wallBounce':       (wall_bounce,        'wall_bounce'),
-    'bounceDirection':  (bounce_direction,   'bounce_direction'),
-}
+def _ckw_transform_to(ed, ctx):
+    idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('stype', ''))
+    if idx is not None:
+        return {'new_type_idx': idx, 'target_speed': ctx.game_def.sprites[idx].speed}
+    return {}
 
-# Derived mappings
-EFFECT_DISPATCH = {v[1]: v[0] for v in EFFECT_REGISTRY.values()}
-VGDL_TO_KEY = {k: v[1] for k, v in EFFECT_REGISTRY.items()}
+def _ckw_clone_sprite(ed, ctx):
+    if ctx.concrete_actor_idx is not None:
+        return {'target_speed': ctx.game_def.sprites[ctx.concrete_actor_idx].speed}
+    return {}
+
+def _ckw_change_resource(ed, ctx):
+    res_name = ed.kwargs.get('resource', '')
+    r_idx = ctx.resource_name_to_idx.get(res_name, 0)
+    value = ed.kwargs.get('value', 0)
+    limit = ctx.resource_limits[r_idx] if ctx.resource_limits else DEFAULT_RESOURCE_LIMIT
+    return {'resource_idx': r_idx, 'value': value, 'limit': limit}
+
+def _ckw_collect_resource(ed, ctx):
+    """Shared by collect_resource and avatar_collect_resource."""
+    if ctx.concrete_actor_idx is not None:
+        res_sd = ctx.game_def.sprites[ctx.concrete_actor_idx]
+    else:
+        actor_indices = ctx.game_def.resolve_stype(ed.actor_stype)
+        res_sd = ctx.game_def.sprites[actor_indices[0]] if actor_indices else None
+    kwargs = {}
+    if res_sd is not None:
+        res_name = res_sd.resource_name or res_sd.key
+        kwargs['resource_idx'] = ctx.resource_name_to_idx.get(res_name, 0)
+        kwargs['resource_value'] = res_sd.resource_value
+        kwargs['limit'] = ctx.resource_limits[kwargs['resource_idx']] if ctx.resource_limits else DEFAULT_RESOURCE_LIMIT
+    return kwargs
+
+def _ckw_avatar_collect_resource(ed, ctx):
+    kwargs = _ckw_collect_resource(ed, ctx)
+    kwargs['avatar_type_idx'] = ctx.avatar_type_idx
+    return kwargs
+
+def _ckw_kill_if_resource(ed, ctx):
+    """Shared by kill_if_has_less/more, kill_if_other_has_more/less."""
+    res_name = ed.kwargs.get('resource', '')
+    return {
+        'resource_idx': ctx.resource_name_to_idx.get(res_name, 0),
+        'limit': ed.kwargs.get('limit', 0),
+    }
+
+def _ckw_kill_if_slow(ed, ctx):
+    return {'limitspeed': ed.kwargs.get('limitspeed', 0.0)}
+
+def _ckw_convey_sprite(ed, ctx):
+    if ctx.concrete_actee_idx is not None:
+        return {'strength': ctx.game_def.sprites[ctx.concrete_actee_idx].strength}
+    return {'strength': 1.0}
+
+def _ckw_spawn_if_has_more(ed, ctx):
+    res_name = ed.kwargs.get('resource', '')
+    kwargs = {
+        'resource_idx': ctx.resource_name_to_idx.get(res_name, 0),
+        'limit': ed.kwargs.get('limit', 0),
+    }
+    idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('stype', ''))
+    if idx is not None:
+        kwargs['spawn_type_idx'] = idx
+        kwargs['target_speed'] = ctx.game_def.sprites[idx].speed
+    return kwargs
+
+def _ckw_slip_forward(ed, ctx):
+    return {'prob': float(ed.kwargs.get('prob', 0.5))}
+
+def _ckw_attract_gaze(ed, ctx):
+    return {'prob': float(ed.kwargs.get('prob', 0.5))}
+
+def _ckw_wind_gust(ed, ctx):
+    if ctx.concrete_actee_idx is not None:
+        return {'strength': float(ctx.game_def.sprites[ctx.concrete_actee_idx].strength)}
+    return {'strength': 1.0}
+
+def _ckw_spend_resource(ed, ctx):
+    res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
+    return {
+        'resource_idx': ctx.resource_name_to_idx.get(res_name, 0),
+        'amount': int(ed.kwargs.get('amount', 1)),
+    }
+
+def _ckw_spend_avatar_resource(ed, ctx):
+    res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
+    return {
+        'resource_idx': ctx.resource_name_to_idx.get(res_name, 0),
+        'amount': int(ed.kwargs.get('amount', 1)),
+        'avatar_type_idx': ctx.avatar_type_idx,
+    }
+
+def _ckw_kill_others(ed, ctx):
+    idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('stype', ed.kwargs.get('target', '')))
+    if idx is not None:
+        return {'kill_type_idx': idx}
+    return {}
+
+def _ckw_kill_if_avatar_without_resource(ed, ctx):
+    res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
+    return {
+        'resource_idx': ctx.resource_name_to_idx.get(res_name, 0),
+        'avatar_type_idx': ctx.avatar_type_idx,
+    }
+
+def _ckw_transform_others_to(ed, ctx):
+    kwargs = {}
+    idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('target', ''))
+    if idx is not None:
+        kwargs['target_type_idx'] = idx
+    idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('stype', ''))
+    if idx is not None:
+        kwargs['new_type_idx'] = idx
+        kwargs['target_speed'] = ctx.game_def.sprites[idx].speed
+    return kwargs
+
+def _ckw_wall_physics(ed, ctx):
+    if 'friction' in ed.kwargs:
+        return {'friction': float(ed.kwargs['friction'])}
+    return {}
+
+def _ckw_teleport_to_exit(ed, ctx):
+    if ctx.concrete_actee_idx is not None:
+        portal_sd = ctx.game_def.sprites[ctx.concrete_actee_idx]
+    else:
+        actee_idx = ctx.resolve_first(ctx.game_def, ed.actee_stype)
+        portal_sd = ctx.game_def.sprites[actee_idx] if actee_idx is not None else None
+    if portal_sd is not None and portal_sd.portal_exit_stype:
+        exit_idx = ctx.resolve_first(ctx.game_def, portal_sd.portal_exit_stype)
+        if exit_idx is not None:
+            return {'exit_type_idx': exit_idx}
+    return {}
 
 
 # ── Static-A handlers ─────────────────────────────────────────────────
@@ -820,15 +960,109 @@ def _static_collect_resource(state, sg_idx, type_b, grid_mask,
         n_killed * jnp.int32(score_change))
 
 
-_STATIC_A_HANDLERS = {
-    'kill_sprite': _static_kill_sprite,
-    'kill_both': _static_kill_both,
-    'kill_if_other_has_more': _static_kill_if_other_has_more,
-    'kill_if_other_has_less': _static_kill_if_other_has_less,
-    'kill_if_avatar_without_resource': _static_kill_if_avatar_without_resource,
-    'collect_resource': _static_collect_resource,
-    'avatar_collect_resource': _static_collect_resource,
+# ── Dispatch ───────────────────────────────────────────────────────────
+
+EFFECT_REGISTRY = {
+    # Kill / removal
+    'killSprite':     EffectEntry(kill_sprite, 'kill_sprite',
+        modifies_alive=True, static_a_handler=_static_kill_sprite),
+    'killBoth':       EffectEntry(kill_both, 'kill_both',
+        needs_partner=True, modifies_alive=True, static_a_handler=_static_kill_both),
+    'killIfAlive':    EffectEntry(kill_if_alive, 'kill_if_alive',
+        needs_partner=True, modifies_alive=True),
+    'killIfSlow':     EffectEntry(kill_if_slow, 'kill_if_slow',
+        modifies_alive=True, compile_kwargs=_ckw_kill_if_slow),
+    'KillOthers':     EffectEntry(kill_others, 'kill_others',
+        modifies_alive=True, compile_kwargs=_ckw_kill_others),
+    'killIfFromAbove': EffectEntry(kill_if_from_above, 'kill_if_from_above',
+        needs_partner=True, modifies_alive=True),
+    # Position and orientation
+    'stepBack':          EffectEntry(step_back, 'step_back', modifies_position=True),
+    'reverseDirection':  EffectEntry(reverse_direction, 'reverse_direction'),
+    'turnAround':        EffectEntry(turn_around, 'turn_around', modifies_position=True),
+    'flipDirection':     EffectEntry(flip_direction, 'flip_direction'),
+    'undoAll':           EffectEntry(undo_all, 'undo_all', modifies_position=True),
+    'wrapAround':        EffectEntry(wrap_around, 'wrap_around', modifies_position=True),
+    'attractGaze':       EffectEntry(attract_gaze, 'attract_gaze',
+        needs_partner=True, compile_kwargs=_ckw_attract_gaze),
+    # Resources
+    'changeResource':       EffectEntry(change_resource, 'change_resource',
+        compile_kwargs=_ckw_change_resource),
+    'collectResource':      EffectEntry(collect_resource, 'collect_resource',
+        needs_partner=True, static_a_handler=_static_collect_resource,
+        compile_kwargs=_ckw_collect_resource),
+    'AvatarCollectResource': EffectEntry(avatar_collect_resource, 'avatar_collect_resource',
+        static_a_handler=_static_collect_resource,
+        compile_kwargs=_ckw_avatar_collect_resource),
+    'SpendResource':        EffectEntry(spend_resource, 'spend_resource',
+        compile_kwargs=_ckw_spend_resource),
+    'SpendAvatarResource':  EffectEntry(spend_avatar_resource, 'spend_avatar_resource',
+        compile_kwargs=_ckw_spend_avatar_resource),
+    'killIfHasLess':        EffectEntry(kill_if_has_less, 'kill_if_has_less',
+        modifies_alive=True, compile_kwargs=_ckw_kill_if_resource),
+    'killIfHasMore':        EffectEntry(kill_if_has_more, 'kill_if_has_more',
+        modifies_alive=True, compile_kwargs=_ckw_kill_if_resource),
+    'killIfOtherHasMore':   EffectEntry(kill_if_other_has_more, 'kill_if_other_has_more',
+        needs_partner=True, modifies_alive=True,
+        static_a_handler=_static_kill_if_other_has_more,
+        compile_kwargs=_ckw_kill_if_resource),
+    'killIfOtherHasLess':   EffectEntry(kill_if_other_has_less, 'kill_if_other_has_less',
+        needs_partner=True, modifies_alive=True,
+        static_a_handler=_static_kill_if_other_has_less,
+        compile_kwargs=_ckw_kill_if_resource),
+    'KillIfAvatarWithoutResource': EffectEntry(kill_if_avatar_without_resource, 'kill_if_avatar_without_resource',
+        modifies_alive=True, static_a_handler=_static_kill_if_avatar_without_resource,
+        compile_kwargs=_ckw_kill_if_avatar_without_resource),
+    # Spawn and transform
+    'transformTo':       EffectEntry(transform_to, 'transform_to',
+        modifies_alive=True, compile_kwargs=_ckw_transform_to),
+    'cloneSprite':       EffectEntry(clone_sprite, 'clone_sprite',
+        modifies_alive=True, compile_kwargs=_ckw_clone_sprite),
+    'spawnIfHasMore':    EffectEntry(spawn_if_has_more, 'spawn_if_has_more',
+        modifies_alive=True, compile_kwargs=_ckw_spawn_if_has_more),
+    'TransformOthersTo': EffectEntry(transform_others_to, 'transform_others_to',
+        compile_kwargs=_ckw_transform_others_to),
+    # Movement and conveying
+    'teleportToExit':   EffectEntry(teleport_to_exit, 'teleport_to_exit',
+        modifies_position=True, compile_kwargs=_ckw_teleport_to_exit),
+    'conveySprite':     EffectEntry(convey_sprite, 'convey_sprite',
+        needs_partner=True, modifies_position=True, compile_kwargs=_ckw_convey_sprite),
+    'windGust':         EffectEntry(wind_gust, 'wind_gust',
+        needs_partner=True, modifies_position=True, compile_kwargs=_ckw_wind_gust),
+    'slipForward':      EffectEntry(slip_forward, 'slip_forward',
+        modifies_position=True, compile_kwargs=_ckw_slip_forward),
+    # Physics / wall interactions
+    'bounceForward':    EffectEntry(partner_delta, 'bounce_forward',
+        needs_partner=True, modifies_position=True),
+    'pullWithIt':       EffectEntry(partner_delta, 'pull_with_it',
+        needs_partner=True, modifies_position=True),
+    'wallStop':         EffectEntry(wall_stop, 'wall_stop',
+        modifies_position=True, compile_kwargs=_ckw_wall_physics),
+    'wallBounce':       EffectEntry(wall_bounce, 'wall_bounce',
+        modifies_position=True, compile_kwargs=_ckw_wall_physics),
+    'bounceDirection':  EffectEntry(bounce_direction, 'bounce_direction',
+        modifies_position=True, compile_kwargs=_ckw_wall_physics),
 }
+
+# Derived from EFFECT_REGISTRY — single source of truth
+EFFECT_DISPATCH = {e.key: e.handler for e in EFFECT_REGISTRY.values()}
+VGDL_TO_KEY = {name: e.key for name, e in EFFECT_REGISTRY.items()}
+_STATIC_A_HANDLERS = {e.key: e.static_a_handler
+                      for e in EFFECT_REGISTRY.values() if e.static_a_handler is not None}
+_ENTRY_BY_KEY = {e.key: e for e in EFFECT_REGISTRY.values()}
+
+# Effect metadata sets (exported for step.py / compiler.py)
+PARTNER_IDX_EFFECTS = frozenset(e.key for e in EFFECT_REGISTRY.values() if e.needs_partner)
+POSITION_MODIFYING_EFFECTS = frozenset(e.key for e in EFFECT_REGISTRY.values() if e.modifies_position)
+ALIVE_MODIFYING_EFFECTS = frozenset(e.key for e in EFFECT_REGISTRY.values() if e.modifies_alive)
+
+
+def compile_effect_kwargs(ed, ctx):
+    """Dispatch to per-effect compile function from registry."""
+    entry = _ENTRY_BY_KEY.get(ed.effect_type)
+    if entry is None or entry.compile_kwargs is None:
+        return {}
+    return entry.compile_kwargs(ed, ctx)
 
 
 def apply_static_a_effect(state, static_a_grid_idx, type_b, grid_mask,

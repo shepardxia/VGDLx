@@ -13,11 +13,13 @@ import jax
 import jax.numpy as jnp
 
 from vgdl_jax.data_model import (
-    GameDef, SpriteClass, TerminationType, PHYSICS_SCALE, STATIC_CLASSES,
+    GameDef, SpriteClass, TerminationType, PHYSICS_SCALE,
+    STATIC_CLASSES, AVATAR_CLASSES, MOVING_NPC_CLASSES, SPRITE_REGISTRY,
     CompiledEffect, AvatarConfig, SpriteConfig,
-    DEFAULT_RESOURCE_LIMIT, NOISY_AVATAR_NOISE_LEVEL, GRAVITY_ACCEL,
-    SPRITE_HEADROOM, N_DIRECTIONS, POSITION_MODIFYING_EFFECTS,
+    DEFAULT_RESOURCE_LIMIT, GRAVITY_ACCEL,
+    SPRITE_HEADROOM, N_DIRECTIONS,
 )
+from vgdl_jax.effects import compile_effect_kwargs, CompileContext, ALIVE_MODIFYING_EFFECTS, POSITION_MODIFYING_EFFECTS
 from vgdl_jax.state import GameState, create_initial_state
 from vgdl_jax.step import build_step_fn
 from vgdl_jax.sprites import DIRECTION_DELTAS
@@ -34,27 +36,6 @@ class CompiledGame:
     static_grid_map: dict  # type_idx → static_grid_idx (empty if no static types)
 
 
-# Avatar type → (n_move_actions, can_shoot)
-AVATAR_INFO = {
-    SpriteClass.MOVING_AVATAR: (4, False),
-    SpriteClass.ORIENTED_AVATAR: (4, False),
-    SpriteClass.HORIZONTAL_AVATAR: (2, False),
-    SpriteClass.FLAK_AVATAR: (2, True),
-    SpriteClass.SHOOT_AVATAR: (4, True),
-    SpriteClass.INERTIAL_AVATAR: (4, False),
-    SpriteClass.MARIO_AVATAR: (5, False),  # LEFT, RIGHT, JUMP, J+L, J+R
-    SpriteClass.VERTICAL_AVATAR: (2, False),
-    SpriteClass.ROTATING_AVATAR: (4, False),
-    SpriteClass.ROTATING_FLIPPING_AVATAR: (4, False),
-    SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR: (4, False),
-    SpriteClass.SHOOT_EVERYWHERE_AVATAR: (4, True),
-    SpriteClass.AIMED_AVATAR: (2, True),      # AIM_UP, AIM_DOWN + shoot
-    SpriteClass.AIMED_FLAK_AVATAR: (4, True),  # LEFT, RIGHT, AIM_UP, AIM_DOWN + shoot
-}
-
-# Avatars whose action indices start at LEFT/RIGHT instead of UP/DOWN
-_HORIZONTAL_AVATARS = {SpriteClass.HORIZONTAL_AVATAR, SpriteClass.FLAK_AVATAR}
-
 def _resolve_first(game_def, stype, default=None):
     """Resolve stype to list of indices, return first or default."""
     if stype is None:
@@ -66,7 +47,7 @@ def _resolve_first(game_def, stype, default=None):
 def _find_avatar(game_def):
     """Find the avatar SpriteDef."""
     for sd in game_def.sprites:
-        if sd.sprite_class in AVATAR_INFO:
+        if sd.sprite_class in AVATAR_CLASSES:
             return sd
     raise AssertionError("No avatar found in game definition")
 
@@ -177,8 +158,10 @@ def _select_collision_mode(a_static, b_static, a_frac, b_frac, speed_a, speed_b)
 
 def _build_avatar_config(avatar_sd, game_def):
     """Build AvatarConfig, n_actions, and n_move from the avatar SpriteDef."""
-    n_move, can_shoot = AVATAR_INFO[avatar_sd.sprite_class]
-    direction_offset = 2 if avatar_sd.sprite_class in _HORIZONTAL_AVATARS else 0
+    sc_def = SPRITE_REGISTRY[avatar_sd.sprite_class]
+    n_move = sc_def.n_move_actions
+    can_shoot = sc_def.can_shoot
+    direction_offset = 2 if sc_def.is_horizontal else 0
 
     proj_type_idx = -1
     proj_ori_from_avatar = False
@@ -217,17 +200,12 @@ def _build_avatar_config(avatar_sd, game_def):
         jump_strength=avatar_sd.jump_strength / PHYSICS_SCALE,
         airsteering=avatar_sd.airsteering,
         gravity=GRAVITY_ACCEL,
-        is_rotating=avatar_sd.sprite_class in (
-            SpriteClass.ROTATING_AVATAR,
-            SpriteClass.ROTATING_FLIPPING_AVATAR,
-            SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR),
-        is_flipping=avatar_sd.sprite_class in (
-            SpriteClass.ROTATING_FLIPPING_AVATAR,
-            SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR),
-        noise_level=NOISY_AVATAR_NOISE_LEVEL if avatar_sd.sprite_class == SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR else 0.0,
-        shoot_everywhere=(avatar_sd.sprite_class == SpriteClass.SHOOT_EVERYWHERE_AVATAR),
-        is_aimed=avatar_sd.sprite_class in (SpriteClass.AIMED_AVATAR, SpriteClass.AIMED_FLAK_AVATAR),
-        can_move_aimed=avatar_sd.sprite_class == SpriteClass.AIMED_FLAK_AVATAR,
+        is_rotating=sc_def.is_rotating,
+        is_flipping=sc_def.is_flipping,
+        noise_level=sc_def.noise_level,
+        shoot_everywhere=sc_def.shoot_everywhere,
+        is_aimed=sc_def.is_aimed,
+        can_move_aimed=sc_def.can_move_aimed,
         angle_diff=avatar_sd.angle_diff,
     )
     return avatar_config, n_actions, n_move
@@ -302,10 +280,11 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                     score_change=ed.score_change,
                     max_a=type_max_n[ta_idx],
                     static_a_grid_idx=static_grid_map.get(ta_idx),
-                    kwargs=_compile_effect_kwargs(
-                        ed, game_def, resource_name_to_idx, resource_limits,
-                        concrete_actor_idx=ta_idx,
-                        avatar_type_idx=avatar_type_idx),
+                    kwargs=compile_effect_kwargs(ed, CompileContext(
+                        game_def, resource_name_to_idx, resource_limits,
+                        avatar_type_idx, concrete_actor_idx=ta_idx,
+                        concrete_actee_idx=None,
+                        resolve_first=_resolve_first)),
                 ))
         else:
             actee_indices = game_def.resolve_stype(ed.actee_stype)
@@ -331,10 +310,11 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                         max_b=type_max_n[tb_idx],
                         static_a_grid_idx=static_grid_map.get(ta_idx),
                         static_b_grid_idx=static_grid_map.get(tb_idx),
-                        kwargs=_compile_effect_kwargs(
-                            ed, game_def, resource_name_to_idx, resource_limits,
-                            concrete_actor_idx=ta_idx, concrete_actee_idx=tb_idx,
-                            avatar_type_idx=avatar_type_idx),
+                        kwargs=compile_effect_kwargs(ed, CompileContext(
+                            game_def, resource_name_to_idx, resource_limits,
+                            avatar_type_idx, concrete_actor_idx=ta_idx,
+                            concrete_actee_idx=tb_idx,
+                            resolve_first=_resolve_first)),
                     ))
     return compiled_effects
 
@@ -376,21 +356,6 @@ def _build_compiled_terminations(game_def, static_type_set, static_grid_map,
     return compiled_terminations
 
 
-_ALIVE_MODIFYING_EFFECTS = frozenset({
-    'kill_sprite', 'kill_both', 'kill_if_alive', 'kill_if_slow',
-    'kill_if_from_above', 'kill_if_has_less', 'kill_if_has_more',
-    'kill_if_other_has_more', 'kill_if_other_has_less',
-    'kill_if_avatar_without_resource', 'kill_others',
-    'transform_to', 'clone_sprite', 'spawn_if_has_more',
-})
-
-_MOVING_NPC_CLASSES = frozenset({
-    SpriteClass.MISSILE, SpriteClass.ERRATIC_MISSILE, SpriteClass.RANDOM_NPC,
-    SpriteClass.CHASER, SpriteClass.FLEEING, SpriteClass.WALKER,
-    SpriteClass.BOMBER, SpriteClass.RANDOM_INERTIAL, SpriteClass.RANDOM_MISSILE,
-    SpriteClass.WALK_JUMPER,
-})
-
 
 def _is_chaser_target_stable(target_idx, game_def, sprite_configs,
                               compiled_effects, avatar_type_idx):
@@ -403,10 +368,10 @@ def _is_chaser_target_stable(target_idx, game_def, sprite_configs,
     sd = game_def.sprites[target_idx]
     cfg = sprite_configs[target_idx]
     # Moving NPC?
-    if cfg.sprite_class in _MOVING_NPC_CLASSES and sd.speed > 0:
+    if cfg.sprite_class in MOVING_NPC_CLASSES and sd.speed > 0:
         return False
     # Modified by effects?
-    _ALL_MODIFYING = _ALIVE_MODIFYING_EFFECTS | POSITION_MODIFYING_EFFECTS
+    _ALL_MODIFYING = ALIVE_MODIFYING_EFFECTS | POSITION_MODIFYING_EFFECTS
     for eff in compiled_effects:
         if eff.is_eos:
             continue
@@ -524,7 +489,7 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
     for cfg in sprite_configs:
         sc = cfg.sprite_class
         if sc in (SpriteClass.CHASER, SpriteClass.FLEEING):
-            if cfg.target_type_idx == 0 and not game_def.sprites[0].sprite_class in AVATAR_INFO:
+            if cfg.target_type_idx == 0 and not game_def.sprites[0].sprite_class in AVATAR_CLASSES:
                 warnings.warn(f"Chaser/Fleeing target defaulted to type 0")
         if sc in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
             if cfg.target_type_idx == 0:
@@ -568,140 +533,6 @@ def _make_timeout(limit, win):
         return check_timeout(s, limit, win)
     return check
 
-
-def _resolve_collect_resource_kwargs(ed, game_def, concrete_actor_idx,
-                                      resource_name_to_idx, resource_limits):
-    """Resolve resource kwargs for COLLECT_RESOURCE / AVATAR_COLLECT_RESOURCE."""
-    if concrete_actor_idx is not None:
-        res_sd = game_def.sprites[concrete_actor_idx]
-    else:
-        actor_indices = game_def.resolve_stype(ed.actor_stype)
-        res_sd = game_def.sprites[actor_indices[0]] if actor_indices else None
-    kwargs = {}
-    if res_sd is not None:
-        res_name = res_sd.resource_name or res_sd.key
-        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
-        kwargs['resource_value'] = res_sd.resource_value
-        kwargs['limit'] = resource_limits[kwargs['resource_idx']] if resource_limits else DEFAULT_RESOURCE_LIMIT
-    return kwargs
-
-
-def _compile_effect_kwargs(ed, game_def, resource_name_to_idx, resource_limits,
-                           concrete_actor_idx=None, concrete_actee_idx=None,
-                           avatar_type_idx=None):
-    """Compile effect kwargs, resolving stype references to type indices."""
-    et = ed.effect_type  # string key (e.g. 'kill_sprite')
-    kwargs = {}
-    if et == 'transform_to':
-        idx = _resolve_first(game_def, ed.kwargs.get('stype', ''))
-        if idx is not None:
-            kwargs['new_type_idx'] = idx
-            kwargs['target_speed'] = game_def.sprites[idx].speed
-
-    elif et == 'clone_sprite':
-        # Clone creates a new sprite of the same type — use actor's default speed
-        if concrete_actor_idx is not None:
-            kwargs['target_speed'] = game_def.sprites[concrete_actor_idx].speed
-
-    elif et == 'change_resource':
-        res_name = ed.kwargs.get('resource', '')
-        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
-        kwargs['value'] = ed.kwargs.get('value', 0)
-        kwargs['limit'] = resource_limits[kwargs['resource_idx']] if resource_limits else DEFAULT_RESOURCE_LIMIT
-
-    elif et == 'collect_resource':
-        kwargs.update(_resolve_collect_resource_kwargs(
-            ed, game_def, concrete_actor_idx, resource_name_to_idx, resource_limits))
-
-    elif et in ('kill_if_has_less', 'kill_if_has_more',
-                'kill_if_other_has_more', 'kill_if_other_has_less'):
-        res_name = ed.kwargs.get('resource', '')
-        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
-        kwargs['limit'] = ed.kwargs.get('limit', 0)
-
-    elif et == 'kill_if_slow':
-        kwargs['limitspeed'] = ed.kwargs.get('limitspeed', 0.0)
-
-    elif et == 'convey_sprite':
-        if concrete_actee_idx is not None:
-            partner_sd = game_def.sprites[concrete_actee_idx]
-            kwargs['strength'] = partner_sd.strength
-        else:
-            kwargs['strength'] = 1.0
-
-    elif et == 'spawn_if_has_more':
-        res_name = ed.kwargs.get('resource', '')
-        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
-        kwargs['limit'] = ed.kwargs.get('limit', 0)
-        idx = _resolve_first(game_def, ed.kwargs.get('stype', ''))
-        if idx is not None:
-            kwargs['spawn_type_idx'] = idx
-            kwargs['target_speed'] = game_def.sprites[idx].speed
-
-    elif et == 'slip_forward':
-        kwargs['prob'] = float(ed.kwargs.get('prob', 0.5))
-
-    elif et == 'attract_gaze':
-        kwargs['prob'] = float(ed.kwargs.get('prob', 0.5))
-
-    elif et == 'wind_gust':
-        # Resolve strength from the actee (wind sprite) SpriteDef
-        if concrete_actee_idx is not None:
-            kwargs['strength'] = float(game_def.sprites[concrete_actee_idx].strength)
-        else:
-            kwargs['strength'] = 1.0
-
-    elif et == 'spend_resource':
-        res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
-        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
-        kwargs['amount'] = int(ed.kwargs.get('amount', 1))
-
-    elif et == 'spend_avatar_resource':
-        res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
-        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
-        kwargs['amount'] = int(ed.kwargs.get('amount', 1))
-        kwargs['avatar_type_idx'] = avatar_type_idx
-
-    elif et == 'kill_others':
-        idx = _resolve_first(game_def, ed.kwargs.get('stype', ed.kwargs.get('target', '')))
-        if idx is not None:
-            kwargs['kill_type_idx'] = idx
-
-    elif et == 'kill_if_avatar_without_resource':
-        res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
-        kwargs['resource_idx'] = resource_name_to_idx.get(res_name, 0)
-        kwargs['avatar_type_idx'] = avatar_type_idx
-
-    elif et == 'avatar_collect_resource':
-        kwargs.update(_resolve_collect_resource_kwargs(
-            ed, game_def, concrete_actor_idx, resource_name_to_idx, resource_limits))
-        kwargs['avatar_type_idx'] = avatar_type_idx
-
-    elif et == 'transform_others_to':
-        idx = _resolve_first(game_def, ed.kwargs.get('target', ''))
-        if idx is not None:
-            kwargs['target_type_idx'] = idx
-        idx = _resolve_first(game_def, ed.kwargs.get('stype', ''))
-        if idx is not None:
-            kwargs['new_type_idx'] = idx
-            kwargs['target_speed'] = game_def.sprites[idx].speed
-
-    elif et in ('wall_stop', 'wall_bounce', 'bounce_direction'):
-        if 'friction' in ed.kwargs:
-            kwargs['friction'] = float(ed.kwargs['friction'])
-
-    elif et == 'teleport_to_exit':
-        if concrete_actee_idx is not None:
-            portal_sd = game_def.sprites[concrete_actee_idx]
-        else:
-            actee_idx = _resolve_first(game_def, ed.actee_stype)
-            portal_sd = game_def.sprites[actee_idx] if actee_idx is not None else None
-        if portal_sd is not None and portal_sd.portal_exit_stype:
-            exit_idx = _resolve_first(game_def, portal_sd.portal_exit_stype)
-            if exit_idx is not None:
-                kwargs['exit_type_idx'] = exit_idx
-
-    return kwargs
 
 
 def _find_active_types(game_def, avatar_sd):

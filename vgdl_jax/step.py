@@ -10,8 +10,8 @@ import jax
 import jax.numpy as jnp
 from vgdl_jax.state import GameState
 from vgdl_jax.collision import detect_eos, in_bounds
-from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES, AABB_THRESHOLD, POSITION_MODIFYING_EFFECTS, PARTNER_IDX_EFFECTS
-from vgdl_jax.effects import apply_masked_effect, apply_static_a_effect
+from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES, AABB_THRESHOLD
+from vgdl_jax.effects import apply_masked_effect, apply_static_a_effect, POSITION_MODIFYING_EFFECTS, PARTNER_IDX_EFFECTS
 from vgdl_jax.sprites import (
     DIRECTION_DELTAS, spawn_sprite,
     update_inertial_avatar, update_mario_avatar,

@@ -97,7 +97,7 @@ Steps/second on CPU (Apple M1, 256 parallel environments):
 
 ## Documentation
 
-- [`tests/MECHANICS_DIFF.md`](tests/MECHANICS_DIFF.md) — Three-way engine comparison (VGDL 1.0 · 2.0 · VGDLx): 18 divergences, validation results, feature coverage
+- [`tests/MECHANICS_DIFF.md`](tests/MECHANICS_DIFF.md) — Four-way engine comparison (VGDL 1.0 · 2.0 · GVGAI · VGDLx): 33 divergences, validation results, feature coverage
 
 ## VGDL Game Format
 
