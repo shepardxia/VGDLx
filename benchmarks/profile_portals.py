@@ -6,7 +6,8 @@ import os
 import jax
 from vgdl_jax.env import VGDLJaxEnv
 from vgdl_jax.parser import parse_vgdl
-from vgdl_jax.data_model import PARTNER_IDX_EFFECTS, STATIC_CLASSES, AVATAR_CLASSES
+from vgdl_jax.data_model import STATIC_CLASSES, AVATAR_CLASSES
+from vgdl_jax.effects import PARTNER_IDX_EFFECTS
 
 GAMES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl', 'vgdl', 'games')
 

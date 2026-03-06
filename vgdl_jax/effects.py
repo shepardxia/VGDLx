@@ -17,7 +17,7 @@ Sections:
 """
 import jax
 import jax.numpy as jnp
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Callable
 from vgdl_jax.collision import in_bounds, AABB_EPS
 from vgdl_jax.data_model import DEFAULT_RESOURCE_LIMIT
@@ -34,21 +34,20 @@ class EffectEntry:
     static_a_handler: Optional[Callable] = None
     compile_kwargs: Optional[Callable] = None  # fn(ed, ctx) → kwargs dict
 
+@dataclass(frozen=True)
 class CompileContext:
     """Bundle of compile-time context passed to per-effect compile functions."""
-    __slots__ = ('game_def', 'resource_name_to_idx', 'resource_limits',
-                 'avatar_type_idx', 'concrete_actor_idx', 'concrete_actee_idx',
-                 'resolve_first')
-    def __init__(self, game_def, resource_name_to_idx, resource_limits,
-                 avatar_type_idx, concrete_actor_idx=None, concrete_actee_idx=None,
-                 resolve_first=None):
-        self.game_def = game_def
-        self.resource_name_to_idx = resource_name_to_idx
-        self.resource_limits = resource_limits
-        self.avatar_type_idx = avatar_type_idx
-        self.concrete_actor_idx = concrete_actor_idx
-        self.concrete_actee_idx = concrete_actee_idx
-        self.resolve_first = resolve_first or (lambda gd, st, d=None: d)
+    game_def: object
+    resource_name_to_idx: object
+    resource_limits: object
+    avatar_type_idx: int
+    concrete_actor_idx: Optional[int] = None
+    concrete_actee_idx: Optional[int] = None
+    resolve_first: Callable = field(default=None)
+
+    def __post_init__(self):
+        if self.resolve_first is None:
+            object.__setattr__(self, 'resolve_first', lambda gd, st, d=None: d)
 
 
 # ── JAX Primitives ───────────────────────────────────────────────────
@@ -797,10 +796,11 @@ def _ckw_kill_if_resource(ed, ctx):
 def _ckw_kill_if_slow(ed, ctx):
     return {'limitspeed': ed.kwargs.get('limitspeed', 0.0)}
 
-def _ckw_convey_sprite(ed, ctx):
+def _ckw_actee_strength(ed, ctx):
     if ctx.concrete_actee_idx is not None:
-        return {'strength': ctx.game_def.sprites[ctx.concrete_actee_idx].strength}
+        return {'strength': float(ctx.game_def.sprites[ctx.concrete_actee_idx].strength)}
     return {'strength': 1.0}
+
 
 def _ckw_spawn_if_has_more(ed, ctx):
     res_name = ed.kwargs.get('resource', '')
@@ -814,16 +814,9 @@ def _ckw_spawn_if_has_more(ed, ctx):
         kwargs['target_speed'] = ctx.game_def.sprites[idx].speed
     return kwargs
 
-def _ckw_slip_forward(ed, ctx):
+def _ckw_prob_half(ed, ctx):
     return {'prob': float(ed.kwargs.get('prob', 0.5))}
 
-def _ckw_attract_gaze(ed, ctx):
-    return {'prob': float(ed.kwargs.get('prob', 0.5))}
-
-def _ckw_wind_gust(ed, ctx):
-    if ctx.concrete_actee_idx is not None:
-        return {'strength': float(ctx.game_def.sprites[ctx.concrete_actee_idx].strength)}
-    return {'strength': 1.0}
 
 def _ckw_spend_resource(ed, ctx):
     res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
@@ -833,12 +826,9 @@ def _ckw_spend_resource(ed, ctx):
     }
 
 def _ckw_spend_avatar_resource(ed, ctx):
-    res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
-    return {
-        'resource_idx': ctx.resource_name_to_idx.get(res_name, 0),
-        'amount': int(ed.kwargs.get('amount', 1)),
-        'avatar_type_idx': ctx.avatar_type_idx,
-    }
+    kwargs = _ckw_spend_resource(ed, ctx)
+    kwargs['avatar_type_idx'] = ctx.avatar_type_idx
+    return kwargs
 
 def _ckw_kill_others(ed, ctx):
     idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('stype', ed.kwargs.get('target', '')))
@@ -984,7 +974,7 @@ EFFECT_REGISTRY = {
     'undoAll':           EffectEntry(undo_all, 'undo_all', modifies_position=True),
     'wrapAround':        EffectEntry(wrap_around, 'wrap_around', modifies_position=True),
     'attractGaze':       EffectEntry(attract_gaze, 'attract_gaze',
-        needs_partner=True, compile_kwargs=_ckw_attract_gaze),
+        needs_partner=True, compile_kwargs=_ckw_prob_half),
     # Resources
     'changeResource':       EffectEntry(change_resource, 'change_resource',
         compile_kwargs=_ckw_change_resource),
@@ -1026,11 +1016,11 @@ EFFECT_REGISTRY = {
     'teleportToExit':   EffectEntry(teleport_to_exit, 'teleport_to_exit',
         modifies_position=True, compile_kwargs=_ckw_teleport_to_exit),
     'conveySprite':     EffectEntry(convey_sprite, 'convey_sprite',
-        needs_partner=True, modifies_position=True, compile_kwargs=_ckw_convey_sprite),
+        needs_partner=True, modifies_position=True, compile_kwargs=_ckw_actee_strength),
     'windGust':         EffectEntry(wind_gust, 'wind_gust',
-        needs_partner=True, modifies_position=True, compile_kwargs=_ckw_wind_gust),
+        needs_partner=True, modifies_position=True, compile_kwargs=_ckw_actee_strength),
     'slipForward':      EffectEntry(slip_forward, 'slip_forward',
-        modifies_position=True, compile_kwargs=_ckw_slip_forward),
+        modifies_position=True, compile_kwargs=_ckw_prob_half),
     # Physics / wall interactions
     'bounceForward':    EffectEntry(partner_delta, 'bounce_forward',
         needs_partner=True, modifies_position=True),
