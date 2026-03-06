@@ -284,9 +284,19 @@ def reverse_direction(state, type_a, mask, score_delta, **_):
     return _with_score(prim_negate_orientation(state, type_a, mask), score_delta)
 
 
-def turn_around(state, prev_positions, type_a, mask, score_delta, **_):
+def turn_around(state, prev_positions, type_a, mask, score_delta, height, width, **_):
+    # py-vgdl: restore position, move DOWN twice, reverse direction
+    state = prim_restore_pos(state, type_a, mask, prev_positions)
+    pos = state.positions[type_a]
+    displaced = pos + mask[:, None] * jnp.array([2.0, 0.0])
+    displaced = jnp.stack([
+        jnp.clip(displaced[:, 0], 0, height - 1),
+        jnp.clip(displaced[:, 1], 0, width - 1),
+    ], axis=-1)
+    state = state.replace(positions=state.positions.at[type_a].set(
+        jnp.where(mask[:, None], displaced, pos)))
     state = prim_negate_orientation(state, type_a, mask)
-    return _with_score(prim_restore_pos(state, type_a, mask, prev_positions), score_delta)
+    return _with_score(state, score_delta)
 
 
 def flip_direction(state, type_a, mask, score_delta, max_n, **_):
@@ -303,16 +313,17 @@ def undo_all(state, prev_positions, mask, score_delta, **_):
     return _with_score(state.replace(positions=new_positions), score_delta)
 
 
-def wrap_around(state, type_a, mask, score_delta, height, width, **_):
+def wrap_around(state, type_a, mask, score_delta, height, width, kwargs=None, **_):
+    offset = (kwargs or {}).get('offset', 0)
     ori = state.orientations[type_a]
     pos = state.positions[type_a]
     row_axis = ori[:, 0] != 0
     new_row = jnp.where(
-        mask & row_axis & (ori[:, 0] < 0), height - 1,
-        jnp.where(mask & row_axis & (ori[:, 0] > 0), 0, pos[:, 0]))
+        mask & row_axis & (ori[:, 0] < 0), height - 1 - offset,
+        jnp.where(mask & row_axis & (ori[:, 0] > 0), 0 + offset, pos[:, 0]))
     new_col = jnp.where(
-        mask & ~row_axis & (ori[:, 1] < 0), width - 1,
-        jnp.where(mask & ~row_axis & (ori[:, 1] > 0), 0, pos[:, 1]))
+        mask & ~row_axis & (ori[:, 1] < 0), width - 1 - offset,
+        jnp.where(mask & ~row_axis & (ori[:, 1] > 0), 0 + offset, pos[:, 1]))
     return _with_score(state.replace(
         positions=state.positions.at[type_a].set(
             jnp.stack([new_row, new_col], axis=-1))), score_delta)
@@ -462,13 +473,17 @@ def teleport_to_exit(state, type_a, mask, score_delta, kwargs, **_):
         target_oris = exit_ori[chosen_slots]          # [max_n, 2]
 
         pos_a = state.positions[type_a]
-        active = mask[:, None] & (n_exits > 0)
+        active_mask = mask & (n_exits > 0)
+        active = active_mask[:, None]
         new_pos = jnp.where(active, targets, pos_a)
         ori_a = state.orientations[type_a]
         new_ori = jnp.where(active, target_oris, ori_a)
+        cooldown = state.cooldown_timers[type_a]
+        new_cooldown = jnp.where(active_mask, 0, cooldown)
         return _with_score(state.replace(
             positions=state.positions.at[type_a].set(new_pos),
             orientations=state.orientations.at[type_a].set(new_ori),
+            cooldown_timers=state.cooldown_timers.at[type_a].set(new_cooldown),
             rng=rng), score_delta)
     return _with_score(state, score_delta)
 
@@ -817,6 +832,12 @@ def _ckw_spawn_if_has_more(ed, ctx):
 def _ckw_prob_half(ed, ctx):
     return {'prob': float(ed.kwargs.get('prob', 0.5))}
 
+def _ckw_wrap_around(ed, ctx):
+    offset = ed.kwargs.get('offset', 0)
+    if offset:
+        return {'offset': int(offset)}
+    return {}
+
 
 def _ckw_spend_resource(ed, ctx):
     res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
@@ -972,7 +993,8 @@ EFFECT_REGISTRY = {
     'turnAround':        EffectEntry(turn_around, 'turn_around', modifies_position=True),
     'flipDirection':     EffectEntry(flip_direction, 'flip_direction'),
     'undoAll':           EffectEntry(undo_all, 'undo_all', modifies_position=True),
-    'wrapAround':        EffectEntry(wrap_around, 'wrap_around', modifies_position=True),
+    'wrapAround':        EffectEntry(wrap_around, 'wrap_around',
+        modifies_position=True, compile_kwargs=_ckw_wrap_around),
     'attractGaze':       EffectEntry(attract_gaze, 'attract_gaze',
         needs_partner=True, compile_kwargs=_ckw_prob_half),
     # Resources
@@ -1032,6 +1054,8 @@ EFFECT_REGISTRY = {
         modifies_position=True, compile_kwargs=_ckw_wall_physics),
     'bounceDirection':  EffectEntry(bounce_direction, 'bounce_direction',
         modifies_position=True, compile_kwargs=_ckw_wall_physics),
+    # No-op
+    'NullEffect':       EffectEntry(null, 'null'),
 }
 
 # Derived from EFFECT_REGISTRY — single source of truth
