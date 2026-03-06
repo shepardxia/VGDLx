@@ -360,12 +360,15 @@ def collect_resource(state, type_a, type_b, mask, score_delta,
     r_idx = kwargs.get('resource_idx', 0)
     r_value = kwargs.get('resource_value', 1)
     limit = kwargs.get('limit', 100)
+    kill_resource = kwargs.get('kill_resource', False)
     if type_b >= 0:
         b_affected = _partner_scatter_mask(mask, partner_idx, state.alive.shape[1])
         cur = state.resources[type_b, :, r_idx]
         new_val = jnp.where(b_affected, jnp.clip(cur + r_value, 0, limit), cur)
         state = state.replace(
             resources=state.resources.at[type_b, :, r_idx].set(new_val))
+    if kill_resource:
+        state = prim_kill(state, type_a, mask)
     return _with_score(state, score_delta)
 
 
@@ -793,6 +796,9 @@ def _ckw_collect_resource(ed, ctx):
         kwargs['resource_idx'] = ctx.resource_name_to_idx.get(res_name, 0)
         kwargs['resource_value'] = res_sd.resource_value
         kwargs['limit'] = ctx.resource_limits[kwargs['resource_idx']] if ctx.resource_limits else DEFAULT_RESOURCE_LIMIT
+    kill_resource = ed.kwargs.get('killResource', 'false')
+    if str(kill_resource).lower() == 'true':
+        kwargs['kill_resource'] = True
     return kwargs
 
 def _ckw_avatar_collect_resource(ed, ctx):

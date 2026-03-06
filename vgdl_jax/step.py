@@ -591,7 +591,7 @@ def _collision_grid_mask_static_a(state, static_grid, type_b,
 def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
                        cache_safe_type_b=frozenset()):
     """Apply all effects using collision detection and mask operations."""
-    bounced = {}  # type_idx → [max_n] bool — once-per-step guard for wallBounce
+    once_guard = {}  # (effect_type, type_idx) → [max_n] bool — once-per-step
     grid_cache = {}  # type_b → [H, W] bool occupancy grid (reused across effects)
     for eff in effects:
         type_a = eff.type_a
@@ -678,11 +678,12 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
                     prebuilt_grid_b=cached_grid_b,
                     need_partner=need_partner)
 
-            # wallBounce once-per-step: skip sprites already bounced this step
-            if effect_type == 'wall_bounce':
-                already = bounced.get(type_a, jnp.zeros(max_n, dtype=jnp.bool_))
+            # once-per-step guards: wallStop, wallBounce, pullWithIt
+            if effect_type in ('wall_stop', 'wall_bounce', 'partner_delta'):
+                key = (effect_type, type_a)
+                already = once_guard.get(key, jnp.zeros(max_n, dtype=jnp.bool_))
                 coll_mask = coll_mask & ~already
-                bounced[type_a] = already | coll_mask
+                once_guard[key] = already | coll_mask
 
             # For effects that need to know about static type_b, pass grid idx
             eff_kwargs = kwargs
@@ -938,7 +939,7 @@ def _npc_bomber(state, type_idx, cfg, height, width):
 _NPC_UPDATERS = {
     SpriteClass.MISSILE: lambda s, ti, cfg, h, w: update_missile(s, ti, cfg.cooldown),
     SpriteClass.ERRATIC_MISSILE: lambda s, ti, cfg, h, w: update_erratic_missile(s, ti, cfg.cooldown, prob=cfg.prob),
-    SpriteClass.RANDOM_NPC: lambda s, ti, cfg, h, w: update_random_npc(s, ti, cfg.cooldown),
+    SpriteClass.RANDOM_NPC: lambda s, ti, cfg, h, w: update_random_npc(s, ti, cfg.cooldown, cons=cfg.cons),
     # CHASER and FLEEING handled inline in _step_inner with precomputed dist_fields
     SpriteClass.FLICKER: lambda s, ti, cfg, h, w: s,
     SpriteClass.ORIENTED_FLICKER: lambda s, ti, cfg, h, w: s,

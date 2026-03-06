@@ -12,6 +12,7 @@ class GameState:
     cooldown_timers: jnp.ndarray # [n_types, max_n] int32
     ages: jnp.ndarray            # [n_types, max_n] int32
     spawn_counts: jnp.ndarray    # [n_types, max_n] int32
+    direction_ticks: jnp.ndarray # [n_types, max_n] int32 — remaining ticks to keep current direction
     resources: jnp.ndarray       # [n_types, max_n, n_resource_types] int32
     velocities: jnp.ndarray      # [n_types, max_n, 2] float32
     passive_forces: jnp.ndarray  # [n_types, max_n, 2] float32
@@ -38,6 +39,7 @@ def create_initial_state(n_types, max_n, height, width,
         cooldown_timers=jnp.zeros((n_types, max_n), dtype=jnp.int32),
         ages=jnp.zeros((n_types, max_n), dtype=jnp.int32),
         spawn_counts=jnp.zeros((n_types, max_n), dtype=jnp.int32),
+        direction_ticks=jnp.zeros((n_types, max_n), dtype=jnp.int32),
         resources=jnp.zeros((n_types, max_n, n_res), dtype=jnp.int32),
         velocities=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
         passive_forces=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),

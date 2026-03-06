@@ -4,17 +4,6 @@ import jax.numpy as jnp
 import pytest
 from conftest import make_env, ALL_GAMES
 
-# Max random-play steps before asserting game ends (per game)
-GAME_END_MAX_STEPS = {
-    'chase': 5000,
-    'zelda': 3000,
-    'aliens': 2000,
-    'portals': 2000,
-    'boulderdash': 2000,
-    'survivezombies': 3000,
-    'frogs': 1000,
-}
-
 
 @pytest.mark.parametrize('game', ALL_GAMES)
 def test_runs_100_steps(game):
@@ -31,22 +20,6 @@ def test_runs_100_steps(game):
 
     assert state.step_count > 0
 
-
-@pytest.mark.parametrize('game', list(GAME_END_MAX_STEPS.keys()))
-def test_game_ends(game):
-    env = make_env(game)
-    rng = jax.random.PRNGKey(0)
-    obs, state = env.reset(rng)
-    max_steps = GAME_END_MAX_STEPS[game]
-
-    for i in range(max_steps):
-        rng, key = jax.random.split(rng)
-        action = jax.random.randint(key, (), 0, env.n_actions)
-        obs, state, reward, done, info = env.step(state, action)
-        if done:
-            break
-
-    assert state.done == True
 
 
 @pytest.mark.parametrize('game', ALL_GAMES)

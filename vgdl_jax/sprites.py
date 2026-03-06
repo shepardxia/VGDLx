@@ -92,15 +92,28 @@ def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
     return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng)
 
 
-def update_random_npc(state: GameState, type_idx, cooldown):
-    """Pick a random direction each move."""
+def update_random_npc(state: GameState, type_idx, cooldown, cons=0):
+    """Pick a random direction each move. cons>0 repeats direction for N ticks."""
     rng, key = jax.random.split(state.rng)
     max_n = state.alive.shape[1]
     dir_indices = jax.random.randint(key, (max_n,), 0, N_DIRECTIONS)
-    deltas = DIRECTION_DELTAS[dir_indices]
+    random_deltas = DIRECTION_DELTAS[dir_indices]
+    if cons > 0:
+        # Use current orientation while direction_ticks > 0, else pick new
+        ticks = state.direction_ticks[type_idx]
+        keep = ticks > 0
+        deltas = jnp.where(keep[:, None], state.orientations[type_idx], random_deltas)
+        new_ticks = jnp.where(keep, ticks - 1, cons)
+    else:
+        deltas = random_deltas
+        new_ticks = None
     new_pos, new_timers, can_move = _move_with_cooldown(state, type_idx, cooldown, deltas=deltas)
     new_ori = jnp.where(can_move[:, None], deltas, state.orientations[type_idx])
-    return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng)
+    state = _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng)
+    if new_ticks is not None:
+        state = state.replace(
+            direction_ticks=state.direction_ticks.at[type_idx].set(new_ticks))
+    return state
 
 
 def _manhattan_distance_field(target_pos, target_alive, height, width):

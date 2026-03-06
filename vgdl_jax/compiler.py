@@ -222,7 +222,9 @@ def _build_sprite_configs(game_def):
             flicker_limit=sd.flicker_limit,
         )
 
-        if sd.sprite_class in (SpriteClass.CHASER, SpriteClass.FLEEING):
+        if sd.sprite_class == SpriteClass.RANDOM_NPC:
+            cfg.cons = sd.cons
+        elif sd.sprite_class in (SpriteClass.CHASER, SpriteClass.FLEEING):
             cfg.target_type_idx = _resolve_first(game_def, sd.spawner_stype, 0)
         elif sd.sprite_class == SpriteClass.SPREADER:
             cfg.spreadprob = sd.spawner_prob

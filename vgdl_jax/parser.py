@@ -347,6 +347,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
     jump_strength = float(args.get('jump_strength', 10.0))
     airsteering = bool(args.get('airsteering', False))
     angle_diff = float(args.get('angle_diff', 0.05))
+    cons = int(args.get('cons', 0))
 
     return SpriteDef(
         key=key,
@@ -375,6 +376,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
         jump_strength=jump_strength,
         airsteering=airsteering,
         angle_diff=angle_diff,
+        cons=cons,
     )
 
 

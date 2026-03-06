@@ -295,6 +295,7 @@ class SpriteDef:
     jump_strength: float = 10.0         # MarioAvatar upward impulse
     airsteering: bool = False            # MarioAvatar air control
     angle_diff: float = 0.05             # AimedAvatar rotation step (radians)
+    cons: int = 0                        # RandomNPC: repeat direction for N consecutive ticks
 
 
 @dataclass
@@ -401,3 +402,4 @@ class SpriteConfig:
     spawn_cooldown: int = 1
     target_orientation: Tuple[float, float] = (0.0, 0.0)
     target_speed: float = 0.0
+    cons: int = 0  # RandomNPC: repeat same direction for N consecutive ticks
