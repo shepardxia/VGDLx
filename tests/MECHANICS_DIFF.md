@@ -30,7 +30,7 @@ specification but has its own behavioral choices.
 | 9 | NoFrictionPhysics removed | {1.0, GVGAI} ≠ {2.0, jax} | LOW | Class absent in 2.0/jax |
 | **Effects** | | | | |
 | 10 | killIfSlow speed calc | all four differ | HIGH | Critical algorithm divergence |
-| 11 | turnAround mechanics | {1.0, 2.0, GVGAI} ≠ jax | HIGH | jax simplified |
+| 11 | turnAround mechanics | — | ~~HIGH~~ FIXED | jax now matches 1.0/2.0 (2-cell-down displacement) |
 | 12 | transformTo state transfer | GVGAI ≠ {1.0, 2.0} ≠ jax | HIGH | 3-way: 1.0/2.0 ori only; jax ori+resources; GVGAI ori+resources+health+player |
 | 13 | wallStop friction | all four differ | MINOR | No game uses friction kwarg |
 | 14 | wallStop once_per_step | {1.0, 2.0, GVGAI} ≠ jax | MODERATE | jax missing guard |
@@ -38,9 +38,9 @@ specification but has its own behavioral choices.
 | 16 | wallBounce batch handling | GVGAI ≠ {1.0, 2.0, jax} | MODERATE | GVGAI has proximity sort |
 | 17 | pullWithIt ContinuousPhysics | {1.0, 2.0, GVGAI} ≠ jax | MODERATE | jax position-delta only |
 | 18 | pullWithIt once_per_step | {1.0, 2.0, GVGAI} ≠ jax | MODERATE | jax missing guard |
-| 19 | teleportToExit cooldown reset | GVGAI ≠ {1.0, 2.0, jax} | LOW | GVGAI resets cooldown on teleport |
+| 19 | teleportToExit cooldown reset | GVGAI ≠ {1.0, 2.0} | ~~LOW~~ FIXED | jax now resets cooldown (matches GVGAI) |
 | 20 | partner_delta int32 truncation | {GVGAI, jax} truncate; {1.0, 2.0} float | MODERATE | GVGAI int pixels; jax explicit cast |
-| 21 | wrapAround offset unsupported | {1.0, 2.0} ≠ {GVGAI, jax} | LOW | Only 1.0/2.0 support offset |
+| 21 | wrapAround offset | {1.0, 2.0, jax} ≠ GVGAI | ~~LOW~~ FIXED | jax now supports offset (matches 1.0/2.0) |
 | **Collision** | | | | |
 | 22 | Collision detection method | all four differ | MINOR | See §5 |
 | 23 | Continuous-physics threshold | GVGAI ≠ 2.0 ≠ jax | MINOR | GVGAI integer AABB |
@@ -159,11 +159,10 @@ Config-fixable.
 
 For static partner (speed=0): all reduce to checking actor's absolute speed.
 
-### 3.2 turnAround (HIGH)
+### 3.2 turnAround (FIXED)
 
-- **1.0 / 2.0 / GVGAI**: Restores position, bypasses cooldown, calls
-  `activeMovement(DOWN)` **twice**, reverses direction. Net: 2 cells down + reversed.
-- **VGDLx**: Negates orientation only. No displacement.
+- **1.0 / 2.0 / GVGAI / VGDLx**: Restores position, displaces 2 cells down,
+  reverses direction. VGDLx now matches (clamped to grid bounds).
 
 ### 3.3 transformTo State Transfer (HIGH)
 
@@ -211,10 +210,11 @@ No standard game uses `friction` on wallStop.
   for ContinuousPhysics. Supports `pixelPerfect`.
 - **VGDLx**: Position delta only. No speed/orientation update, no once_per_step.
 
-### 3.9 teleportToExit — Cooldown Reset (LOW)
+### 3.9 teleportToExit — Cooldown Reset (FIXED)
 
-All engines copy position and exit orientation. GVGAI additionally resets
-cooldown (`lastmove = 0`), allowing immediate movement after teleport.
+All engines copy position and exit orientation. GVGAI and VGDLx reset
+cooldown on teleport, allowing immediate movement after arrival.
+1.0/2.0 do not reset cooldown.
 
 ### 3.10 partner_delta int32 Truncation (MODERATE)
 
@@ -231,10 +231,10 @@ cooldown (`lastmove = 0`), allowing immediate movement after teleport.
 - **GVGAI**: Configurable `killResource` flag — can collect without destroying.
 - **Others**: Always kills resource sprite on success.
 
-### 3.13 wrapAround offset (LOW)
+### 3.13 wrapAround offset (FIXED)
 
-- **1.0 / 2.0**: `offset` parameter shifts wrap destination.
-- **GVGAI / VGDLx**: No offset support.
+- **1.0 / 2.0 / VGDLx**: `offset` parameter shifts wrap destination.
+- **GVGAI**: No offset support.
 
 ---
 
