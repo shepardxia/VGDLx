@@ -23,7 +23,11 @@ import numpy as np
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.join(SCRIPT_DIR, '..')
 
-from vgdl_jax.validate.constants import ALL_GAMES, STOCHASTIC_GAMES, GAMES_DIR
+from vgdl_jax.validate.constants import PYVGDL_GAMES, PYVGDL_GAMES_DIR
+
+ALL_GAMES = sorted(PYVGDL_GAMES.keys())
+STOCHASTIC_GAMES = [g for g in ALL_GAMES if g != 'sokoban']
+GAMES_DIR = PYVGDL_GAMES_DIR
 
 RESULTS_DIR = os.path.join(PROJECT_DIR, 'validation_results')
 TABLES_DIR = os.path.join(RESULTS_DIR, 'tables')

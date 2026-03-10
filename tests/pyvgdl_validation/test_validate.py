@@ -2,12 +2,14 @@
 Pytest tests for the validation harness.
 
 Tests validation levels 0-3 (py-vgdl) and cross-engine comparison (py-vgdl vs vgdl-jax).
+Uses discovery-based game parametrization from PYVGDL_GAMES.
 """
 import os
 import pytest
 import numpy as np
 
-from vgdl_jax.validate.constants import GAMES_DIR, ALL_GAMES, DETERMINISTIC_GAMES, STOCHASTIC_GAMES, BLOCK_SIZE
+from vgdl_jax.validate.constants import PYVGDL_GAMES, PYVGDL_GAMES_DIR, BLOCK_SIZE
+from vgdl_jax.validate.discovery import GameEntry
 from vgdl_jax.validate.harness import (
     validate_pyvgdl_loads,
     validate_pyvgdl_state_extraction,
@@ -23,25 +25,31 @@ from vgdl_jax.validate.harness import (
 )
 from vgdl_jax.validate.state_extractor import extract_pyvgdl_state
 
+# ── Discovered game entries ─────────────────────────────────────────
+
+ENTRIES = list(PYVGDL_GAMES.values())
+DETERMINISTIC_ENTRIES = [e for e in ENTRIES if e.name == 'sokoban']
+STOCHASTIC_ENTRIES = [e for e in ENTRIES if e.name != 'sokoban']
+
 
 # ── Level 0: Game loads ──────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("game", ALL_GAMES)
-def test_pyvgdl_loads(game):
+@pytest.mark.parametrize("entry", ENTRIES, ids=lambda e: e.name)
+def test_pyvgdl_loads(entry):
     """Level 0: py-vgdl loads the game without error."""
-    success, error = validate_pyvgdl_loads(game)
-    assert success, f"Failed to load {game}: {error}"
+    success, error = validate_pyvgdl_loads(entry)
+    assert success, f"Failed to load {entry.name}: {error}"
 
 
 # ── Level 1: State extraction ────────────────────────────────────────
 
 
-@pytest.mark.parametrize("game", ALL_GAMES)
-def test_pyvgdl_extracts_state(game):
+@pytest.mark.parametrize("entry", ENTRIES, ids=lambda e: e.name)
+def test_pyvgdl_extracts_state(entry):
     """Level 1: initial state is extractable and well-formed."""
-    success, result = validate_pyvgdl_state_extraction(game)
-    assert success, f"State extraction failed for {game}: {result}"
+    success, result = validate_pyvgdl_state_extraction(entry)
+    assert success, f"State extraction failed for {entry.name}: {result}"
 
     state = result
     # Every type should have non-negative alive count
@@ -61,11 +69,11 @@ def test_pyvgdl_extracts_state(game):
 # ── Level 2+3: Trajectory runs ───────────────────────────────────────
 
 
-@pytest.mark.parametrize("game", ALL_GAMES)
-def test_pyvgdl_trajectory_runs(game):
+@pytest.mark.parametrize("entry", ENTRIES, ids=lambda e: e.name)
+def test_pyvgdl_trajectory_runs(entry):
     """Level 2+3: py-vgdl runs a 50-step NOOP trajectory, states extracted."""
-    success, result = validate_pyvgdl_trajectory(game, n_steps=50, seed=42)
-    assert success, f"Trajectory failed for {game}: {result}"
+    success, result = validate_pyvgdl_trajectory(entry, n_steps=50, seed=42)
+    assert success, f"Trajectory failed for {entry.name}: {result}"
 
     states = result
     # Should have initial + at least 1 step
@@ -77,17 +85,17 @@ def test_pyvgdl_trajectory_runs(game):
         assert states[1]['step'] == 1
 
 
-@pytest.mark.parametrize("game", ALL_GAMES)
-def test_pyvgdl_trajectory_with_actions(game):
+@pytest.mark.parametrize("entry", ENTRIES, ids=lambda e: e.name)
+def test_pyvgdl_trajectory_with_actions(entry):
     """Run a trajectory with non-NOOP actions."""
-    game_obj, action_keys, _ = setup_pyvgdl_game(game)
+    game_obj, action_keys, _ = setup_pyvgdl_game(entry)
     n_actions = len(action_keys)
 
     # Cycle through all actions
     actions = [i % n_actions for i in range(30)]
-    states = run_pyvgdl_trajectory(game, actions, seed=42)
+    states = run_pyvgdl_trajectory(entry, actions, seed=42)
 
-    assert len(states) >= 2, f"Expected at least 2 states for {game}"
+    assert len(states) >= 2, f"Expected at least 2 states for {entry.name}"
 
     # All states should be well-formed
     for i, s in enumerate(states):
@@ -98,15 +106,15 @@ def test_pyvgdl_trajectory_with_actions(game):
 # ── Deterministic reproducibility ────────────────────────────────────
 
 
-@pytest.mark.parametrize("game", DETERMINISTIC_GAMES)
-def test_pyvgdl_deterministic_reproducibility(game):
+@pytest.mark.parametrize("entry", DETERMINISTIC_ENTRIES, ids=lambda e: e.name)
+def test_pyvgdl_deterministic_reproducibility(entry):
     """Deterministic games produce identical trajectories with same seed."""
-    game_obj, action_keys, _ = setup_pyvgdl_game(game)
+    game_obj, action_keys, _ = setup_pyvgdl_game(entry)
     n_actions = len(action_keys)
     actions = [i % n_actions for i in range(20)]
 
-    states_a = run_pyvgdl_trajectory(game, actions, seed=42)
-    states_b = run_pyvgdl_trajectory(game, actions, seed=42)
+    states_a = run_pyvgdl_trajectory(entry, actions, seed=42)
+    states_b = run_pyvgdl_trajectory(entry, actions, seed=42)
 
     assert len(states_a) == len(states_b), "Different trajectory lengths"
     for i, (sa, sb) in enumerate(zip(states_a, states_b)):
@@ -122,8 +130,8 @@ def test_pyvgdl_deterministic_reproducibility(game):
 # ── ReplayRandomGenerator integration ────────────────────────────────
 
 
-@pytest.mark.parametrize("game", STOCHASTIC_GAMES)
-def test_pyvgdl_with_replay_rng(game):
+@pytest.mark.parametrize("entry", STOCHASTIC_ENTRIES, ids=lambda e: e.name)
+def test_pyvgdl_with_replay_rng(entry):
     """Verify ReplayRandomGenerator can be injected and game still runs."""
     import jax
     from vgdl_jax.validate.rng_replay import RNGRecorder, ReplayRandomGenerator
@@ -132,9 +140,7 @@ def test_pyvgdl_with_replay_rng(game):
     from vgdl_jax.compiler import compile_game
 
     # Set up JAX side for RNG recording
-    game_file = os.path.join(GAMES_DIR, f'{game}.txt')
-    level_file = os.path.join(GAMES_DIR, f'{game}_lvl0.txt')
-    gd = parse_vgdl(game_file, level_file)
+    gd = parse_vgdl(entry.game_file, entry.level_files[0])
     compiled = compile_game(gd)
     max_n = compiled.init_state.alive.shape[1]
 
@@ -146,7 +152,7 @@ def test_pyvgdl_with_replay_rng(game):
     replay_rng = ReplayRandomGenerator(gd)
 
     # Set up py-vgdl
-    game_obj, action_keys, sprite_key_order = setup_pyvgdl_game(game)
+    game_obj, action_keys, sprite_key_order = setup_pyvgdl_game(entry)
     game_obj.set_seed(42)
     game_obj.set_random_generator(replay_rng)
 
@@ -179,9 +185,8 @@ def test_rng_recorder_produces_valid_records():
     from vgdl_jax.data_model import SpriteClass
 
     # Use chase — has Chaser and Fleeing NPCs
-    game_file = os.path.join(GAMES_DIR, 'chase.txt')
-    level_file = os.path.join(GAMES_DIR, 'chase_lvl0.txt')
-    gd = parse_vgdl(game_file, level_file)
+    chase = PYVGDL_GAMES['chase']
+    gd = parse_vgdl(chase.game_file, chase.level_files[0])
     compiled = compile_game(gd)
     max_n = compiled.init_state.alive.shape[1]
 
@@ -220,50 +225,50 @@ def test_rng_recorder_produces_valid_records():
 # ══════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.parametrize("game", ALL_GAMES)
-def test_cross_engine_initial_state(game):
+@pytest.mark.parametrize("entry", ENTRIES, ids=lambda e: e.name)
+def test_cross_engine_initial_state(entry):
     """Initial state must match exactly for all games."""
-    result = run_comparison(game, actions=[], seed=42)
+    result = run_comparison(entry, actions=[], seed=42)
     init_step = result.steps[0]
     assert init_step.matches, (
-        f"{game}: initial state differs:\n" +
+        f"{entry.name}: initial state differs:\n" +
         "\n".join(f"  - {d}" for d in init_step.diffs)
     )
 
 
-@pytest.mark.parametrize("game", DETERMINISTIC_GAMES)
-def test_cross_engine_deterministic(game):
+@pytest.mark.parametrize("entry", DETERMINISTIC_ENTRIES, ids=lambda e: e.name)
+def test_cross_engine_deterministic(entry):
     """Deterministic games must match exactly for 30 steps."""
-    compiled, _ = setup_jax_game(game)
+    compiled, _ = setup_jax_game(entry)
     noop_idx = compiled.noop_action
 
     # Cycle through all actions for broader coverage
     actions = [i % compiled.n_actions for i in range(30)]
-    result = run_comparison(game, actions, seed=42)
+    result = run_comparison(entry, actions, seed=42)
 
     failing_steps = [s for s in result.steps if not s.matches]
     assert len(failing_steps) == 0, (
-        f"{game}: {len(failing_steps)} steps diverged:\n" +
+        f"{entry.name}: {len(failing_steps)} steps diverged:\n" +
         "\n".join(
             f"  step {s.step}: {s.diffs}" for s in failing_steps[:5]
         )
     )
 
 
-@pytest.mark.parametrize("game", STOCHASTIC_GAMES)
-def test_cross_engine_with_rng_replay(game):
+@pytest.mark.parametrize("entry", STOCHASTIC_ENTRIES, ids=lambda e: e.name)
+def test_cross_engine_with_rng_replay(entry):
     """Stochastic games with RNG replay — strict comparison, no relaxation."""
-    compiled, _ = setup_jax_game(game)
+    compiled, _ = setup_jax_game(entry)
 
     # Use NOOP to isolate NPC behavior
     noop_idx = compiled.noop_action
     actions = [noop_idx] * 20
 
-    result = run_comparison(game, actions, seed=42, use_rng_replay=True)
+    result = run_comparison(entry, actions, seed=42, use_rng_replay=True)
 
     failing_steps = [s for s in result.steps if not s.matches]
     assert len(failing_steps) == 0, (
-        f"{game}: {len(failing_steps)}/{len(result.steps)} steps diverged "
+        f"{entry.name}: {len(failing_steps)}/{len(result.steps)} steps diverged "
         f"with RNG replay:\n" +
         "\n".join(
             f"  step {s.step}: {s.diffs}" for s in failing_steps[:5]
@@ -274,15 +279,15 @@ def test_cross_engine_with_rng_replay(game):
 # ── JAX-only trajectory tests ────────────────────────────────────────
 
 
-@pytest.mark.parametrize("game", ALL_GAMES)
-def test_jax_trajectory_runs(game):
+@pytest.mark.parametrize("entry", ENTRIES, ids=lambda e: e.name)
+def test_jax_trajectory_runs(entry):
     """vgdl-jax runs a 30-step trajectory without error."""
-    compiled, _ = setup_jax_game(game)
+    compiled, _ = setup_jax_game(entry)
     noop_idx = compiled.noop_action
     actions = [noop_idx] * 30
 
-    states = run_jax_trajectory(game, actions, seed=42)
-    assert len(states) >= 2, f"Expected at least 2 states for {game}"
+    states = run_jax_trajectory(entry, actions, seed=42)
+    assert len(states) >= 2, f"Expected at least 2 states for {entry.name}"
 
     # All states should be well-formed
     for i, s in enumerate(states):
@@ -290,14 +295,14 @@ def test_jax_trajectory_runs(game):
         assert isinstance(s['score'], (int, float)), f"Step {i}: bad score type"
 
 
-@pytest.mark.parametrize("game", DETERMINISTIC_GAMES)
-def test_jax_deterministic_reproducibility(game):
+@pytest.mark.parametrize("entry", DETERMINISTIC_ENTRIES, ids=lambda e: e.name)
+def test_jax_deterministic_reproducibility(entry):
     """Deterministic games produce identical JAX trajectories with same seed."""
-    compiled, _ = setup_jax_game(game)
+    compiled, _ = setup_jax_game(entry)
     actions = [i % compiled.n_actions for i in range(20)]
 
-    states_a = run_jax_trajectory(game, actions, seed=42)
-    states_b = run_jax_trajectory(game, actions, seed=42)
+    states_a = run_jax_trajectory(entry, actions, seed=42)
+    states_b = run_jax_trajectory(entry, actions, seed=42)
 
     assert len(states_a) == len(states_b), "Different trajectory lengths"
     for i, (sa, sb) in enumerate(zip(states_a, states_b)):

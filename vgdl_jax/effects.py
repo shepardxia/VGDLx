@@ -345,14 +345,19 @@ def attract_gaze(state, type_a, type_b, mask, score_delta, kwargs, max_n,
 
 # ── Resources ──────────────────────────────────────────────────────────
 
-def change_resource(state, type_a, mask, score_delta, kwargs, **_):
+def change_resource(state, type_a, type_b, mask, score_delta, kwargs,
+                    partner_idx=None, **_):
     r_idx = kwargs.get('resource_idx', 0)
     value = kwargs.get('value', 0)
     limit = kwargs.get('limit', 100)
+    kill_resource = kwargs.get('kill_resource', False)
     cur = state.resources[type_a, :, r_idx]
     new_val = jnp.where(mask, jnp.clip(cur + value, 0, limit), cur)
-    return _with_score(state.replace(
-        resources=state.resources.at[type_a, :, r_idx].set(new_val)), score_delta)
+    state = state.replace(resources=state.resources.at[type_a, :, r_idx].set(new_val))
+    if kill_resource and type_b >= 0:
+        b_affected = _partner_scatter_mask(mask, partner_idx, state.alive.shape[1])
+        state = prim_kill(state, type_b, b_affected)
+    return _with_score(state, score_delta)
 
 
 def collect_resource(state, type_a, type_b, mask, score_delta,
@@ -407,9 +412,17 @@ def spend_avatar_resource(state, mask, score_delta, kwargs, **_):
 def transform_to(state, type_a, mask, score_delta, kwargs, **_):
     new_type = kwargs['new_type_idx']
     target_speed = kwargs.get('target_speed', None)
+    copy_ori = kwargs.get('copy_orientation', True)
+    if copy_ori:
+        orientations = state.orientations[type_a]
+    else:
+        default_ori = kwargs.get('default_orientation', (0.0, 1.0))
+        orientations = jnp.broadcast_to(
+            jnp.array(default_ori, dtype=jnp.float32),
+            state.orientations[type_a].shape)
     state = _with_score(prim_kill(state, type_a, mask), score_delta)
     return _fill_slots(state, new_type, mask,
-                       state.positions[type_a], state.orientations[type_a],
+                       state.positions[type_a], orientations,
                        target_speed=target_speed, reset_cooldown=True,
                        src_resources=state.resources[type_a])
 
@@ -538,9 +551,6 @@ def partner_delta(state, prev_positions, type_a, type_b, mask,
         new_pos = jnp.where(valid[:, None],
                             state.positions[type_a] + b_delta,
                             state.positions[type_a])
-        new_pos = jnp.clip(new_pos,
-                           jnp.array([0, 0]),
-                           jnp.array([height - 1, width - 1]))
         state = state.replace(
             positions=state.positions.at[type_a].set(new_pos))
     return _with_score(state, score_delta)
@@ -768,7 +778,21 @@ def null(state, score_delta, **_):
 def _ckw_transform_to(ed, ctx):
     idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('stype', ''))
     if idx is not None:
-        return {'new_type_idx': idx, 'target_speed': ctx.game_def.sprites[idx].speed}
+        from vgdl_jax.data_model import SPRITE_REGISTRY
+        src_def = ctx.game_def.sprites[ctx.concrete_actor_idx] if ctx.concrete_actor_idx is not None else None
+        dst_def = ctx.game_def.sprites[idx]
+        # GVGAI: copy orientation only if both source and target are is_oriented
+        src_oriented = SPRITE_REGISTRY.get(src_def.sprite_class, None) if src_def else None
+        dst_oriented = SPRITE_REGISTRY.get(dst_def.sprite_class, None)
+        force_ori = ed.kwargs.get('forceOrientation', 'false').lower() == 'true' if isinstance(ed.kwargs.get('forceOrientation'), str) else bool(ed.kwargs.get('forceOrientation', False))
+        copy_ori = force_ori or (
+            (src_oriented is not None and src_oriented.is_oriented) and
+            (dst_oriented is not None and dst_oriented.is_oriented))
+        result = {'new_type_idx': idx, 'target_speed': dst_def.speed,
+                  'copy_orientation': copy_ori}
+        if not copy_ori:
+            result['default_orientation'] = dst_def.orientation
+        return result
     return {}
 
 def _ckw_clone_sprite(ed, ctx):
@@ -781,7 +805,11 @@ def _ckw_change_resource(ed, ctx):
     r_idx = ctx.resource_name_to_idx.get(res_name, 0)
     value = ed.kwargs.get('value', 0)
     limit = ctx.resource_limits[r_idx] if ctx.resource_limits else DEFAULT_RESOURCE_LIMIT
-    return {'resource_idx': r_idx, 'value': value, 'limit': limit}
+    kill_resource = str(ed.kwargs.get('killResource', 'false')).lower() == 'true'
+    result = {'resource_idx': r_idx, 'value': value, 'limit': limit}
+    if kill_resource:
+        result['kill_resource'] = True
+    return result
 
 def _ckw_collect_resource(ed, ctx):
     """Shared by collect_resource and avatar_collect_resource."""
@@ -1005,6 +1033,7 @@ EFFECT_REGISTRY = {
         needs_partner=True, compile_kwargs=_ckw_prob_half),
     # Resources
     'changeResource':       EffectEntry(change_resource, 'change_resource',
+        needs_partner=True, modifies_alive=True,
         compile_kwargs=_ckw_change_resource),
     'collectResource':      EffectEntry(collect_resource, 'collect_resource',
         needs_partner=True, static_a_handler=_static_collect_resource,

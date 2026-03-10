@@ -20,7 +20,7 @@
 
 **killIfSlow** (HIGH) — GVGAI: `magnitude(ori1 - ori2)` (orientation divergence, not speed). VGDLx: `abs(speed_a - speed_b)` (scalar). Both agree for static partners.
 
-**transformTo** (HIGH) — GVGAI copies orientation + resources + health + player state. VGDLx copies orientation + resources only.
+**transformTo** — GVGAI copies orientation (conditional on `is_oriented` + `forceOrientation`) + resources + health + player state. VGDLx copies orientation (conditional, matching GVGAI) + resources. Missing: health, player state (GVGAI-only features).
 
 **wallStop** — GVGAI: pixel-perfect positioning, velocity recalculation, friction commented out. VGDLx: `wall_pos ± 1.0`, applies `(1-friction)` scaling. No game uses friction.
 
@@ -37,7 +37,7 @@ GVGAI: `Rectangle.intersects()`, integer pixels. VGDLx: grid occupancy or AABB (
 
 **Chaser** — GVGAI: greedy 1-step Manhattan, random tiebreak. VGDLx: distance field relaxation, routes around walls (accepted as better).
 
-**SpawnPoint** — GVGAI: `(start_tick + game_tick) % cooldown`. VGDLx: per-sprite decrementing timers.
+**SpawnPoint** — GVGAI: `(start_tick + game_tick) % cooldown`. VGDLx: per-sprite incrementing timers, initialized to `cooldown - 1` for level-placed sprites (matching GVGAI's tick-0 fire). Dynamically spawned sprites still init to 0 (matching GVGAI's deferred first-update for new sprites).
 
 **Walker** — GVGAI: gravity + `airsteering`, `speed=5`. VGDLx: horizontal walk + random jumps.
 
@@ -62,6 +62,20 @@ Not implemented in VGDLx:
 
 **Avatars**: NullAvatar, BirdAvatar, CarAvatar, LanderAvatar, MissileAvatar, OngoingAvatar, OngoingShootAvatar, OngoingTurningAvatar, PlatformerAvatar, SpaceshipAvatar, WizardAvatar
 
+## GVGAI Cross-Engine Validation (42 supported games, 10 steps)
+
+**14 exact match**: bait, brainman, chainreaction, chipschallenge, clusters, cookmepasta, flower, modality, realsokoban, shipwreck, sokoban, superman, thesnowman, wrapsokoban
+
+**17 speed/position + SpawnPoint**: aliens, angelsdemons, assemblyline, chopper, defender, factorymanager, ikaruga, infection, jaws, myAliens, plaqueattack, rivers, sheriff, surround, waitforbreakfast, waves, wildgunman — fractional speed arithmetic differs (GVGAI `speed × gridsize` pixels vs VGDLx `pos += ori * speed` cells). SpawnPoint timing was fixed but speed divergence causes cascading position/alive diffs.
+
+**4 speed/position only**: avoidgeorge, butterflies, missilecommand, portals — no SpawnPoints, pure fractional position drift from integer-pixel vs float-cell physics.
+
+**2 NPC movement**: chase, whackamole — Chaser pathfinding difference (greedy vs distance field).
+
+**5 partial match** (noop matches, movement fails): eggomania, glow, islands, tercio, thecitadel
+
+**1 compile error**: sistersavior — VGDLx can't find avatar in game definition.
+
 ## Coverage (VGDLx / GVGAI)
 
 Unary effects ~50%, binary effects ~57%, avatar types ~74%, terminations ~80%, physics 100%. Shield, health, time effects, batch dispatch: 0%.
@@ -74,7 +88,7 @@ Where GVGAI and VGDLx agree but 1.0/2.0 differ. VGDLx inherits 2.0.
 
 - **Termination timing** — 1.0 checks at tick start (N-1 steps for Timeout=N); 2.0/GVGAI/VGDLx check at end
 - **GravityPhysics.gravity** — 1.0: `0.5`; 2.0/VGDLx: `1`; GVGAI: per-sprite. Config-fixable
-- **partner_delta** — GVGAI/VGDLx both truncate to int32; 1.0/2.0 keep float
+- **partner_delta** — GVGAI truncates to int32; 1.0/2.0 keep float. VGDLx keeps float, no longer clips to grid bounds (allows OOB for wrapAround)
 - **killIfSlow** — 1.0: `vectNorm(vel1 - vel2)`; 2.0: same but `relSpeed`/`relspeed` typo → NameError
 - **transformTo** — 1.0/2.0 copy orientation only (no resources)
 - **wallStop** — 1.0: applies friction; 2.0: friction dead code

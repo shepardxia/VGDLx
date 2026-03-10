@@ -444,7 +444,8 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
             orientations=state.orientations.at[type_idx, slot].set(
                 jnp.array(sd.orientation, dtype=jnp.float32)),
             speeds=state.speeds.at[type_idx, slot].set(jnp.float32(sd.speed)),
-            cooldown_timers=state.cooldown_timers.at[type_idx, slot].set(jnp.int32(0)),
+            cooldown_timers=state.cooldown_timers.at[type_idx, slot].set(
+                jnp.int32(max(sd.cooldown, 1) - 1)),
         )
         slot_counts[type_idx] += 1
     state = state.replace(static_grids=jnp.array(static_grid_data))

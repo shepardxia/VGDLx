@@ -1,17 +1,17 @@
 #!/usr/bin/env python
 """
-Standalone CLI validation script for vgdl-jax vs py-vgdl cross-engine comparison.
+Standalone CLI validation script for vgdl-jax cross-engine comparison.
 
-For each of 9 games x 3 action sequences (NOOP, cycling, random), runs both engines
-via the validation harness and classifies results. Writes structured output to
-validation_results/ and optionally generates a LaTeX summary table.
+Supports both py-vgdl and GVGAI as reference engines, with auto-discovery
+and compatibility filtering.
 
 Usage:
-    python scripts/validate_all.py                  # run full validation
-    python scripts/validate_all.py --latex-only     # regenerate tables from results.json
-    python scripts/validate_all.py --game chase     # single game
-    python scripts/validate_all.py --steps 50       # custom trajectory length
-    python scripts/validate_all.py --render-diffs   # generate PNGs/GIFs on mismatch
+    python scripts/validate_all.py                                    # py-vgdl, all games
+    python scripts/validate_all.py --source gvgai --compat-only       # GVGAI compat report
+    python scripts/validate_all.py --source gvgai --compat-filter supported --game aliens
+    python scripts/validate_all.py --game chase --steps 50
+    python scripts/validate_all.py --latex-only                       # regenerate tables
+    python scripts/validate_all.py --render-diffs                     # generate PNGs/GIFs
 """
 
 import argparse
@@ -19,11 +19,12 @@ import json
 import os
 import sys
 import time
-import traceback
 
-from vgdl_jax.validate.constants import ALL_GAMES
+from vgdl_jax.validate.discovery import discover_games, GameEntry
+from vgdl_jax.validate.constants import PYVGDL_GAMES, GVGAI_GAMES, PYVGDL_GAMES_DIR, GVGAI_GAMES_DIR
 from vgdl_jax.validate.harness import (
     run_comparison,
+    run_gvgai_comparison,
     setup_jax_game,
 )
 
@@ -41,18 +42,7 @@ OUTPUT_DIR = os.path.join(PROJECT_DIR, "validation_results")
 
 
 def _make_actions(traj_type, n_actions, n_steps, seed=42, noop_idx=None):
-    """Generate an action sequence of the given type.
-
-    Args:
-        traj_type: one of 'noop', 'cycling', 'random'
-        n_actions: total number of actions available
-        n_steps: trajectory length
-        seed: random seed for 'random' type
-        noop_idx: explicit NOOP action index
-
-    Returns:
-        list[int] of action indices
-    """
+    """Generate an action sequence of the given type."""
     if noop_idx is None:
         noop_idx = n_actions - 1
     if traj_type == "noop":
@@ -71,12 +61,7 @@ def _make_actions(traj_type, n_actions, n_steps, seed=42, noop_idx=None):
 
 
 def _classify_result(result):
-    """Classify a TrajectoryResult into a status string.
-
-    Returns one of:
-        'match'       - all steps match exactly
-        'state_error' - at least one step diverges
-    """
+    """Classify a TrajectoryResult into a status string."""
     if all(sc.matches for sc in result.steps):
         return "match"
     return "state_error"
@@ -85,9 +70,17 @@ def _classify_result(result):
 # ── Per-game validation ─────────────────────────────────────────────────────
 
 
-def validate_game(game_name, n_steps=30, seed=42, render_diffs=False,
-                   output_dir=None):
+def validate_game(entry: GameEntry, n_steps=30, seed=42, render_diffs=False,
+                   output_dir=None, backend='pyvgdl'):
     """Run all 3 trajectory types for a single game.
+
+    Args:
+        entry: GameEntry
+        n_steps: trajectory length
+        seed: random seed
+        render_diffs: generate visual diff artifacts
+        output_dir: output directory for artifacts
+        backend: 'pyvgdl' for py-vgdl comparison, 'gvgai' for GVGAI comparison
 
     Returns:
         dict with keys: status, trajectories, errors, timing
@@ -103,7 +96,7 @@ def validate_game(game_name, n_steps=30, seed=42, render_diffs=False,
 
     # Get n_actions from JAX compiled game
     try:
-        compiled, game_def = setup_jax_game(game_name)
+        compiled, game_def = setup_jax_game(entry)
         n_actions = compiled.n_actions
         noop_idx = compiled.noop_action
     except Exception as e:
@@ -116,18 +109,19 @@ def validate_game(game_name, n_steps=30, seed=42, render_diffs=False,
     status_rank = {"match": 0, "state_error": 1, "compile_error": 2}
 
     for traj_type in TRAJECTORY_TYPES:
-        traj_key = f"trajectory_{traj_type}"
         try:
             actions = _make_actions(traj_type, n_actions, n_steps, seed=seed,
                                     noop_idx=noop_idx)
 
-            # Stochastic games use RNG replay; sokoban is deterministic
-            use_rng = game_name != "sokoban"
-
-            result = run_comparison(
-                game_name, actions, seed=seed,
-                use_rng_replay=use_rng,
-            )
+            if backend == 'gvgai':
+                result = run_gvgai_comparison(entry, actions, seed=seed)
+            else:
+                # Stochastic games use RNG replay; sokoban is deterministic
+                use_rng = entry.name != "sokoban"
+                result = run_comparison(
+                    entry, actions, seed=seed,
+                    use_rng_replay=use_rng,
+                )
 
             status = _classify_result(result)
 
@@ -149,22 +143,20 @@ def validate_game(game_name, n_steps=30, seed=42, render_diffs=False,
                 "steps": step_data,
             }
 
-            # Render artifacts if requested (GIF always, PNGs at divergences)
+            # Render artifacts if requested
             if render_diffs and output_dir:
                 try:
                     render_diff_artifacts(
-                        game_name, traj_type, result, actions,
+                        entry, traj_type, result, actions,
                         seed=seed, output_dir=output_dir)
                 except Exception as render_err:
                     game_result["errors"].append(
                         f"render {traj_type}: {render_err}")
 
-            # Track worst status across trajectories
             if status_rank.get(status, 99) > status_rank.get(worst_status, 0):
                 worst_status = status
 
         except Exception as e:
-            tb = traceback.format_exc()
             game_result["trajectories"][traj_type] = {
                 "status": "compile_error",
                 "error": str(e),
@@ -181,7 +173,7 @@ def validate_game(game_name, n_steps=30, seed=42, render_diffs=False,
 
 
 def _serialize_step_data(step_data):
-    """Make step data JSON-serializable (convert sets, tuples, etc.)."""
+    """Make step data JSON-serializable."""
     if isinstance(step_data, dict):
         return {str(k): _serialize_step_data(v) for k, v in step_data.items()}
     elif isinstance(step_data, (list, tuple)):
@@ -193,16 +185,9 @@ def _serialize_step_data(step_data):
 
 
 def write_results(all_results, output_dir):
-    """Write structured results to output_dir/.
-
-    Creates:
-        results.json                           - aggregate stats
-        per_game/{game}/trajectory_{type}.json - per-step comparison data
-        per_game/{game}/errors.txt             - human-readable error log
-    """
+    """Write structured results to output_dir/."""
     os.makedirs(output_dir, exist_ok=True)
 
-    # Aggregate summary
     total = len(all_results)
     matching = sum(1 for r in all_results.values() if r["status"] == "match")
     state_errors = sum(1 for r in all_results.values() if r["status"] == "state_error")
@@ -215,7 +200,6 @@ def write_results(all_results, output_dir):
         "compile_errors": compile_errors,
     }
 
-    # Build per_game dict for results.json (without step-level detail)
     per_game_summary = {}
     for game_name, result in all_results.items():
         per_game_summary[game_name] = {
@@ -241,18 +225,15 @@ def write_results(all_results, output_dir):
         json.dump(output, f, indent=2, default=str)
     print(f"  Wrote {results_path}")
 
-    # Per-game detailed files
     for game_name, result in all_results.items():
         game_dir = os.path.join(output_dir, "per_game", game_name)
         os.makedirs(game_dir, exist_ok=True)
 
-        # Trajectory JSON files (with step-level data)
         for ttype, tdata in result["trajectories"].items():
             traj_path = os.path.join(game_dir, f"trajectory_{ttype}.json")
             with open(traj_path, "w") as f:
                 json.dump(_serialize_step_data(tdata), f, indent=2, default=str)
 
-        # Error log
         if result["errors"]:
             error_path = os.path.join(game_dir, "errors.txt")
             with open(error_path, "w") as f:
@@ -277,11 +258,7 @@ _STATUS_SYMBOL = {
 
 
 def _traj_cell(traj_data):
-    """Format a trajectory result for the LaTeX table.
-
-    Returns a string like '\\checkmark' or '$\\times$ (3/30)' showing
-    the number of failing steps.
-    """
+    """Format a trajectory result for the LaTeX table."""
     status = traj_data.get("status", "unknown")
     symbol = _STATUS_SYMBOL.get(status, "?")
     if status in ("match", "compile_error", "unknown"):
@@ -295,10 +272,7 @@ def _traj_cell(traj_data):
 
 
 def generate_latex(results_json_path, output_dir):
-    """Generate LaTeX validation summary table from results.json.
-
-    Output: validation_results/tables/validation_summary.tex
-    """
+    """Generate LaTeX validation summary table from results.json."""
     with open(results_json_path) as f:
         data = json.load(f)
 
@@ -322,25 +296,17 @@ def generate_latex(results_json_path, output_dir):
     lines.append(r"Game & Init State & NOOP & Cycling & Random & Overall \\")
     lines.append(r"\midrule")
 
-    for game_name in ALL_GAMES:
-        gdata = per_game.get(game_name)
-        if gdata is None:
-            lines.append(f"{game_name} & -- & -- & -- & -- & -- \\\\")
-            continue
+    for game_name in sorted(per_game.keys()):
+        gdata = per_game[game_name]
 
-        # Init state: check step 0 of the NOOP trajectory
         noop_traj = gdata["trajectories"].get("noop", {})
-        init_ok = True  # assume ok unless we find step-0 failure
-        # We can infer from the noop trajectory: if level >= 1, init was ok
         init_level = noop_traj.get("level", 0)
         init_symbol = r"\checkmark" if init_level >= 1 else r"$\times$"
 
-        # Per-trajectory cells
         noop_cell = _traj_cell(gdata["trajectories"].get("noop", {}))
         cycling_cell = _traj_cell(gdata["trajectories"].get("cycling", {}))
         random_cell = _traj_cell(gdata["trajectories"].get("random", {}))
 
-        # Overall
         overall_symbol = _STATUS_SYMBOL.get(gdata["status"], "?")
 
         escaped_name = game_name.replace("_", r"\_")
@@ -351,7 +317,6 @@ def generate_latex(results_json_path, output_dir):
 
     lines.append(r"\midrule")
 
-    # Summary row
     total = summary["total_games"]
     matching = summary["matching"]
     errors = summary["state_errors"]
@@ -407,7 +372,6 @@ def print_summary(all_results):
             for err in result["errors"]:
                 print(f"           ERROR: {err}")
 
-    # Totals
     total = len(all_results)
     matching = sum(1 for r in all_results.values() if r["status"] == "match")
     errors = sum(1 for r in all_results.values()
@@ -417,19 +381,49 @@ def print_summary(all_results):
     print("=" * 70)
 
 
+# ── Compatibility report ─────────────────────────────────────────────────────
+
+
+def print_compat_report(entries: list[GameEntry]):
+    """Print compatibility report by attempting to compile each game."""
+    supported = []
+    unsupported = []
+
+    for entry in entries:
+        if not entry.level_files:
+            unsupported.append((entry.name, "no level files"))
+            continue
+        try:
+            setup_jax_game(entry)
+            supported.append(entry.name)
+        except Exception as e:
+            unsupported.append((entry.name, str(e)))
+
+    print(f"\n{'=' * 70}")
+    print(f"COMPATIBILITY REPORT ({len(entries)} games)")
+    print(f"{'=' * 70}")
+
+    print(f"\n  Supported: {len(supported)}")
+    for name in sorted(supported):
+        print(f"    [OK] {name}")
+
+    print(f"\n  Unsupported: {len(unsupported)}")
+    for name, reason in sorted(unsupported):
+        print(f"    [--] {name:<30s} {reason}")
+
+    print(f"\n  Summary: {len(supported)}/{len(entries)} supported")
+    print(f"{'=' * 70}")
+
+
 # ── Visual diff rendering ───────────────────────────────────────────────────
 
 
-def _render_jax_frames(game_name, actions, seed=42, block_size=24):
-    """Re-run JAX trajectory and render each step to RGB.
-
-    Returns:
-        list of (step_idx, np.ndarray[H*bs, W*bs, 3] uint8) frames
-    """
+def _render_jax_frames(entry: GameEntry, actions, seed=42, block_size=24):
+    """Re-run JAX trajectory and render each step to RGB."""
     import jax
     from vgdl_jax.render import render_pygame
 
-    compiled, game_def = setup_jax_game(game_name)
+    compiled, game_def = setup_jax_game(entry)
     sgm = compiled.static_grid_map
     state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
     step_fn = compiled.step_fn
@@ -461,30 +455,21 @@ def _annotate_frame(frame, step_idx, diffs, is_divergent):
     return annotated
 
 
-def render_diff_artifacts(game_name, traj_type, comparison_result, actions,
+def render_diff_artifacts(entry: GameEntry, traj_type, comparison_result, actions,
                           seed, output_dir, block_size=24):
-    """Render and save visual diff artifacts for a trajectory.
-
-    Saves:
-        per_game/{game}/step_NNN_jax.png   — at divergence points
-        per_game/{game}/trajectory_{type}.gif — full animated trajectory
-    """
+    """Render and save visual diff artifacts for a trajectory."""
     import imageio.v3 as iio
 
-    game_dir = os.path.join(output_dir, "per_game", game_name)
+    game_dir = os.path.join(output_dir, "per_game", entry.name)
     os.makedirs(game_dir, exist_ok=True)
 
-    # Build lookup of divergent steps
     divergent_steps = {}
     for sc in comparison_result.steps:
         if not sc.matches:
             divergent_steps[sc.step] = sc.diffs
 
-    # Render JAX trajectory
-    frames = _render_jax_frames(game_name, actions, seed=seed,
-                                block_size=block_size)
+    frames = _render_jax_frames(entry, actions, seed=seed, block_size=block_size)
 
-    # Save divergence PNGs and build GIF frames
     gif_frames = []
     for step_idx, frame in frames:
         is_div = step_idx in divergent_steps
@@ -497,7 +482,6 @@ def render_diff_artifacts(game_name, traj_type, comparison_result, actions,
                 game_dir, f"step_{step_idx:03d}_{traj_type}_jax.png")
             iio.imwrite(png_path, frame)
 
-    # Save GIF
     if gif_frames:
         gif_path = os.path.join(game_dir, f"trajectory_{traj_type}.gif")
         iio.imwrite(gif_path, gif_frames, duration=200, loop=0)
@@ -506,13 +490,39 @@ def render_diff_artifacts(game_name, traj_type, comparison_result, actions,
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
+def _get_games(args) -> dict[str, GameEntry]:
+    """Get games dict based on --source and --game flags."""
+    if args.source == 'pyvgdl':
+        games = dict(PYVGDL_GAMES)
+    elif args.source == 'gvgai':
+        games = dict(GVGAI_GAMES)
+    else:
+        # Custom directory
+        entries = discover_games(args.source, source='custom')
+        games = {e.name: e for e in entries}
+
+    if args.game:
+        if args.game not in games:
+            available = sorted(games.keys())
+            print(f"ERROR: Unknown game '{args.game}'. Available ({len(available)}): "
+                  f"{', '.join(available[:20])}{'...' if len(available) > 20 else ''}")
+            sys.exit(1)
+        games = {args.game: games[args.game]}
+
+    return games
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Cross-engine validation: py-vgdl vs vgdl-jax"
+        description="Cross-engine validation for vgdl-jax"
+    )
+    parser.add_argument(
+        "--source", type=str, default="pyvgdl",
+        help="Game source: 'pyvgdl', 'gvgai', or path to game directory (default: pyvgdl)",
     )
     parser.add_argument(
         "--game", type=str, default=None,
-        help="Run validation for a single game (e.g. 'chase')",
+        help="Run validation for a single game by name",
     )
     parser.add_argument(
         "--steps", type=int, default=30,
@@ -523,8 +533,17 @@ def main():
         help="Random seed (default: 42)",
     )
     parser.add_argument(
+        "--compat-only", action="store_true",
+        help="Print compatibility report only, no validation",
+    )
+    parser.add_argument(
+        "--compat-filter", type=str, default="supported",
+        choices=["supported", "all"],
+        help="Filter for validation: 'supported' (default) or 'all'",
+    )
+    parser.add_argument(
         "--latex-only", action="store_true",
-        help="Regenerate LaTeX table from existing results.json (no re-run)",
+        help="Regenerate LaTeX table from existing results.json",
     )
     parser.add_argument(
         "--output-dir", type=str, default=None,
@@ -548,26 +567,54 @@ def main():
         print("Done (LaTeX only).")
         return
 
-    # ── Select games ──
-    games = ALL_GAMES
-    if args.game:
-        if args.game not in ALL_GAMES:
-            print(f"ERROR: Unknown game '{args.game}'. Available: {ALL_GAMES}")
-            sys.exit(1)
-        games = [args.game]
+    # ── Get games ──
+    games = _get_games(args)
+
+    if not games:
+        print("ERROR: No games found.")
+        sys.exit(1)
+
+    # ── Compat-only mode ──
+    if args.compat_only:
+        print_compat_report(list(games.values()))
+        return
+
+    # ── Filter by compatibility ──
+    if args.compat_filter == "supported":
+        supported = {}
+        n_skipped = 0
+        for name, entry in games.items():
+            if not entry.level_files:
+                n_skipped += 1
+                continue
+            try:
+                setup_jax_game(entry)
+                supported[name] = entry
+            except Exception:
+                n_skipped += 1
+        if n_skipped > 0:
+            print(f"Skipping {n_skipped} unsupported game(s)")
+        games = supported
+
+    if not games:
+        print("No supported games to validate.")
+        return
 
     # ── Run validation ──
     print(f"Running validation for {len(games)} game(s), "
-          f"{args.steps} steps, seed={args.seed}")
+          f"{args.steps} steps, seed={args.seed}, source={args.source}")
     print(f"Trajectory types: {TRAJECTORY_TYPES}")
     print()
 
+    # Determine backend: gvgai source uses GVGAI backend, pyvgdl uses py-vgdl backend
+    backend = 'gvgai' if args.source == 'gvgai' else 'pyvgdl'
+
     all_results = {}
-    for game_name in games:
+    for game_name, entry in sorted(games.items()):
         print(f"  Validating {game_name}...", end="", flush=True)
-        result = validate_game(game_name, n_steps=args.steps, seed=args.seed,
+        result = validate_game(entry, n_steps=args.steps, seed=args.seed,
                                render_diffs=args.render_diffs,
-                               output_dir=output_dir)
+                               output_dir=output_dir, backend=backend)
         all_results[game_name] = result
         icon = {"match": "ok", "state_error": "FAIL", "compile_error": "ERROR"}
         print(f" {icon.get(result['status'], '?')} ({result['timing_s']:.1f}s)")

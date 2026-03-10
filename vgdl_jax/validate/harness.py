@@ -1,8 +1,7 @@
 """
 Validation harness: orchestrates cross-engine comparison between py-vgdl and vgdl-jax.
 
-Supports both single-engine validation and cross-engine trajectory comparison
-with optional RNG replay for stochastic games.
+All functions accept GameEntry objects for game identification (no string-based path construction).
 
 Validation levels (inspired by PuzzleJAX validate_sols.py):
   0: Game loads
@@ -16,7 +15,7 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional
 
-from .constants import GAMES_DIR
+from .discovery import GameEntry
 
 # Ensure py-vgdl is importable (needed by setup_pyvgdl_game)
 _PYVGDL_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'py-vgdl')
@@ -123,8 +122,12 @@ def compare_states(state_a, state_b):
 # ── py-vgdl trajectory runner ────────────────────────────────────────
 
 
-def setup_pyvgdl_game(game_name):
+def setup_pyvgdl_game(entry: GameEntry, level_idx=0):
     """Set up py-vgdl game without renderer (state extraction only).
+
+    Args:
+        entry: GameEntry with game_file and level_files
+        level_idx: which level to use (default 0)
 
     Returns:
         (game, action_keys, sprite_key_order)
@@ -134,12 +137,9 @@ def setup_pyvgdl_game(game_name):
     """
     import vgdl as pyvgdl
 
-    game_file = os.path.join(GAMES_DIR, f'{game_name}.txt')
-    level_file = os.path.join(GAMES_DIR, f'{game_name}_lvl0.txt')
-
-    with open(game_file) as f:
+    with open(entry.game_file) as f:
         game_desc = f.read()
-    with open(level_file) as f:
+    with open(entry.level_files[level_idx]) as f:
         level_desc = f.read()
 
     domain = pyvgdl.VGDLParser().parse_game(game_desc)
@@ -156,21 +156,22 @@ def setup_pyvgdl_game(game_name):
     return game, action_keys, sprite_key_order
 
 
-def run_pyvgdl_trajectory(game_name, actions, seed=42, rng_replay=None):
+def run_pyvgdl_trajectory(entry: GameEntry, actions, seed=42, rng_replay=None, level_idx=0):
     """Run py-vgdl for an action sequence, return state at each step.
 
     Args:
-        game_name: e.g. 'chase', 'zelda'
+        entry: GameEntry
         actions: list of int action indices
         seed: random seed for py-vgdl
         rng_replay: optional ReplayRandomGenerator to inject
+        level_idx: which level to use
 
     Returns:
         list of normalized state dicts (one per step, including initial state)
     """
     from .state_extractor import extract_pyvgdl_state
 
-    game, action_keys, sprite_key_order = setup_pyvgdl_game(game_name)
+    game, action_keys, sprite_key_order = setup_pyvgdl_game(entry, level_idx)
     game.set_seed(seed)
 
     if rng_replay is not None:
@@ -192,20 +193,20 @@ def run_pyvgdl_trajectory(game_name, actions, seed=42, rng_replay=None):
     return states
 
 
-def validate_pyvgdl_loads(game_name):
+def validate_pyvgdl_loads(entry: GameEntry, level_idx=0):
     """Validation level 0: game loads without error.
 
     Returns:
         (success: bool, error_msg: str or None)
     """
     try:
-        game, action_keys, sprite_key_order = setup_pyvgdl_game(game_name)
+        setup_pyvgdl_game(entry, level_idx)
         return True, None
     except Exception as e:
         return False, str(e)
 
 
-def validate_pyvgdl_state_extraction(game_name):
+def validate_pyvgdl_state_extraction(entry: GameEntry, level_idx=0):
     """Validation level 1: initial state is extractable and well-formed.
 
     Returns:
@@ -214,7 +215,7 @@ def validate_pyvgdl_state_extraction(game_name):
     from .state_extractor import extract_pyvgdl_state
 
     try:
-        game, action_keys, sprite_key_order = setup_pyvgdl_game(game_name)
+        game, action_keys, sprite_key_order = setup_pyvgdl_game(entry, level_idx)
         state = extract_pyvgdl_state(game, sprite_key_order, game.block_size)
 
         # Basic sanity checks
@@ -233,7 +234,7 @@ def validate_pyvgdl_state_extraction(game_name):
         return False, str(e)
 
 
-def validate_pyvgdl_trajectory(game_name, n_steps=50, seed=42):
+def validate_pyvgdl_trajectory(entry: GameEntry, n_steps=50, seed=42, level_idx=0):
     """Validation levels 2+3: run trajectory, verify states extracted at each step.
 
     Uses NOOP action to minimize avatar-driven complexity.
@@ -242,12 +243,12 @@ def validate_pyvgdl_trajectory(game_name, n_steps=50, seed=42):
         (success: bool, states_or_error)
     """
     try:
-        game, action_keys, _ = setup_pyvgdl_game(game_name)
+        game, action_keys, _ = setup_pyvgdl_game(entry, level_idx)
         # Find NOOP action index (Action with empty keys tuple)
         noop_idx = next(i for i, a in enumerate(action_keys) if a.keys == ())
         actions = [noop_idx] * n_steps
 
-        states = run_pyvgdl_trajectory(game_name, actions, seed=seed)
+        states = run_pyvgdl_trajectory(entry, actions, seed=seed, level_idx=level_idx)
 
         assert len(states) >= 2, f"Expected at least 2 states, got {len(states)}"
 
@@ -264,11 +265,15 @@ def validate_pyvgdl_trajectory(game_name, n_steps=50, seed=42):
 # ── vgdl-jax trajectory runner ─────────────────────────────────────
 
 
-def setup_jax_game(game_name):
-    """Set up vgdl-jax compiled game from the shared game files.
+def setup_jax_game(entry: GameEntry, level_idx=0):
+    """Set up vgdl-jax compiled game from a GameEntry.
 
     Uses max_sprites_per_type large enough for ALL sprites (including inert
     background tiles like 'floor'/'grass') so counts match py-vgdl exactly.
+
+    Args:
+        entry: GameEntry with game_file and level_files
+        level_idx: which level to use (default 0)
 
     Returns:
         (compiled, game_def)
@@ -277,10 +282,7 @@ def setup_jax_game(game_name):
     from vgdl_jax.parser import parse_vgdl
     from vgdl_jax.compiler import compile_game
 
-    game_file = os.path.join(GAMES_DIR, f'{game_name}.txt')
-    level_file = os.path.join(GAMES_DIR, f'{game_name}_lvl0.txt')
-
-    game_def = parse_vgdl(game_file, level_file)
+    game_def = parse_vgdl(entry.game_file, entry.level_files[level_idx])
     # Compute max sprites needed across all types (including inert background)
     counts = Counter(t for t, r, c in game_def.level.initial_sprites)
     max_n = max(counts.values(), default=1) + 10  # headroom for spawns
@@ -288,7 +290,7 @@ def setup_jax_game(game_name):
     return compiled, game_def
 
 
-def run_jax_trajectory(game_name, actions, seed=42):
+def run_jax_trajectory(entry: GameEntry, actions, seed=42, level_idx=0):
     """Run vgdl-jax for an action sequence, return state at each step.
 
     Returns list of normalized state dicts (same format as run_pyvgdl_trajectory).
@@ -296,7 +298,7 @@ def run_jax_trajectory(game_name, actions, seed=42):
     import jax
     from .state_extractor import extract_jax_state
 
-    compiled, game_def = setup_jax_game(game_name)
+    compiled, game_def = setup_jax_game(entry, level_idx)
     sgm = compiled.static_grid_map
     state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
 
@@ -312,30 +314,29 @@ def run_jax_trajectory(game_name, actions, seed=42):
     return states
 
 
-def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
+def run_comparison(entry: GameEntry, actions, seed=42, use_rng_replay=False, level_idx=0):
     """Run both engines on same actions, compare state at every step.
 
     Args:
-        game_name: e.g. 'chase', 'zelda'
+        entry: GameEntry
         actions: list of int action indices
         seed: random seed
         use_rng_replay: if True, record JAX RNG sequence and inject into py-vgdl
+        level_idx: which level to use
 
     Returns:
         TrajectoryResult with per-step StepComparison.
     """
     import jax
     from .state_extractor import extract_pyvgdl_state, extract_jax_state
-    from vgdl_jax.parser import parse_vgdl
-    from vgdl_jax.compiler import compile_game
 
     # ── Set up JAX side ──
-    compiled, game_def = setup_jax_game(game_name)
+    compiled, game_def = setup_jax_game(entry, level_idx)
     sgm = compiled.static_grid_map
     jax_state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
 
     # ── Set up py-vgdl side ──
-    game, action_keys, sprite_key_order = setup_pyvgdl_game(game_name)
+    game, action_keys, sprite_key_order = setup_pyvgdl_game(entry, level_idx)
     game.set_seed(seed)
 
     # ── Optional RNG replay ──
@@ -405,7 +406,56 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
             matches=matches, diffs=diffs,
         ))
 
-    # ── Determine validation level ──
+    # ── Build result ──
+    return _build_trajectory_result(entry, actions, step_comparisons)
+
+
+# ── GVGAI comparison ─────────────────────────────────────────────────
+
+
+def run_gvgai_comparison(entry: GameEntry, actions, seed=42, level_idx=0):
+    """Run GVGAI and VGDLx on same actions, compare state at every step.
+
+    Args:
+        entry: GameEntry (must have source='gvgai' or point to GVGAI game files)
+        actions: list of int action indices (VGDLx convention)
+        seed: random seed
+        level_idx: which level to use
+
+    Returns:
+        TrajectoryResult with per-step StepComparison.
+    """
+    from .backend_gvgai import run_gvgai_trajectory, normalize_gvgai_state
+
+    # ── Run JAX side (reuse run_jax_trajectory) ──
+    compiled, game_def = setup_jax_game(entry, level_idx)
+    jax_states = run_jax_trajectory(entry, actions, seed, level_idx)
+
+    # ── Run GVGAI side ──
+    gvgai_raw = run_gvgai_trajectory(
+        entry, actions, seed=seed, level_idx=level_idx,
+        noop_action=compiled.noop_action,
+        shoot_action=compiled.noop_action + 1 if compiled.n_actions > compiled.noop_action + 1 else None,
+    )
+    gvgai_states = [normalize_gvgai_state(s, game_def) for s in gvgai_raw]
+
+    # ── Compare step by step ──
+    step_comparisons = []
+    n_steps = min(len(jax_states), len(gvgai_states))
+    for i in range(n_steps):
+        action = actions[i - 1] if i > 0 and i - 1 < len(actions) else -1
+        matches, diffs = compare_states(gvgai_states[i], jax_states[i])
+        step_comparisons.append(StepComparison(
+            step=i, action=action,
+            state_a=gvgai_states[i], state_b=jax_states[i],
+            matches=matches, diffs=diffs,
+        ))
+
+    return _build_trajectory_result(entry, actions, step_comparisons)
+
+
+def _build_trajectory_result(entry, actions, step_comparisons):
+    """Compute validation level and build TrajectoryResult."""
     all_match = all(sc.matches for sc in step_comparisons)
     init_match = step_comparisons[0].matches if step_comparisons else False
     level = 0
@@ -419,7 +469,7 @@ def run_comparison(game_name, actions, seed=42, use_rng_replay=False):
         level = 4
 
     return TrajectoryResult(
-        game_name=game_name,
+        game_name=entry.name,
         n_steps=len(actions),
         actions=actions,
         steps=step_comparisons,
@@ -513,5 +563,3 @@ def get_effects(compiled):
                                 exit_indices[0] if exit_indices else -1)
                     effects.append(eff)
     return effects
-
-

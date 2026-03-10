@@ -72,6 +72,7 @@ class SpriteClassDef:
     is_avatar: bool = False
     default_speed: float = 0.0      # 0.0 = stationary default, 1.0 = speed-1
     is_moving_npc: bool = False     # participates in NPC update loop
+    is_oriented: bool = False       # GVGAI is_oriented flag (affects transformTo orientation copy)
     # Avatar properties
     n_move_actions: int = 0
     can_shoot: bool = False
@@ -110,6 +111,7 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
     SpriteClass.CONVEYOR: SpriteClassDef(
         vgdl_names=('Conveyor',),
         is_static=True,
+        is_oriented=True,
     ),
 
     # --- Moving NPC classes (speed defaults to 1.0) ---
@@ -117,27 +119,32 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         vgdl_names=('Missile',),
         default_speed=1.0,
         is_moving_npc=True,
+        is_oriented=True,
     ),
     SpriteClass.RANDOM_NPC: SpriteClassDef(
         vgdl_names=('RandomNPC',),
         default_speed=1.0,
         is_moving_npc=True,
+        is_oriented=True,
     ),
     SpriteClass.CHASER: SpriteClassDef(
         vgdl_names=('Chaser', 'AStarChaser'),
         default_speed=1.0,
         is_moving_npc=True,
+        is_oriented=True,
     ),
     SpriteClass.FLEEING: SpriteClassDef(
         vgdl_names=('Fleeing',),
         default_speed=1.0,
         is_moving_npc=True,
+        is_oriented=True,
     ),
     SpriteClass.FLICKER: SpriteClassDef(
         vgdl_names=('Flicker',),
     ),
     SpriteClass.ORIENTED_FLICKER: SpriteClassDef(
         vgdl_names=('OrientedFlicker',),
+        is_oriented=True,
     ),
     SpriteClass.SPAWN_POINT: SpriteClassDef(
         vgdl_names=('SpawnPoint',),
@@ -146,27 +153,32 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         vgdl_names=('Bomber',),
         default_speed=1.0,
         is_moving_npc=True,
+        is_oriented=True,
     ),
     SpriteClass.WALKER: SpriteClassDef(
         vgdl_names=('Walker',),
         default_speed=1.0,
         is_moving_npc=True,
+        is_oriented=True,
     ),
     SpriteClass.ERRATIC_MISSILE: SpriteClassDef(
         vgdl_names=('ErraticMissile',),
         default_speed=1.0,
         is_moving_npc=True,
+        is_oriented=True,
     ),
     SpriteClass.RANDOM_INERTIAL: SpriteClassDef(
         vgdl_names=('RandomInertial',),
         default_speed=1.0,
         is_moving_npc=True,
+        is_oriented=True,
         physics_type=PHYSICS_CONTINUOUS,
     ),
     SpriteClass.RANDOM_MISSILE: SpriteClassDef(
         vgdl_names=('RandomMissile',),
         default_speed=1.0,
         is_moving_npc=True,
+        is_oriented=True,
     ),
     SpriteClass.SPREADER: SpriteClassDef(
         vgdl_names=('Spreader',),
@@ -188,11 +200,13 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         vgdl_names=('FlakAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=2, can_shoot=True, is_horizontal=True,
+        is_oriented=True,
     ),
     SpriteClass.SHOOT_AVATAR: SpriteClassDef(
         vgdl_names=('ShootAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4, can_shoot=True,
+        is_oriented=True,
     ),
     SpriteClass.HORIZONTAL_AVATAR: SpriteClassDef(
         vgdl_names=('HorizontalAvatar',),
@@ -203,6 +217,7 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         vgdl_names=('OrientedAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4,
+        is_oriented=True,
     ),
     SpriteClass.VERTICAL_AVATAR: SpriteClassDef(
         vgdl_names=('VerticalAvatar',),
@@ -223,32 +238,38 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         vgdl_names=('RotatingAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4, is_rotating=True,
+        is_oriented=True,
     ),
     SpriteClass.ROTATING_FLIPPING_AVATAR: SpriteClassDef(
         vgdl_names=('RotatingFlippingAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4, is_rotating=True, is_flipping=True,
+        is_oriented=True,
     ),
     SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR: SpriteClassDef(
         vgdl_names=('NoisyRotatingFlippingAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4, is_rotating=True, is_flipping=True,
         noise_level=NOISY_AVATAR_NOISE_LEVEL,
+        is_oriented=True,
     ),
     SpriteClass.SHOOT_EVERYWHERE_AVATAR: SpriteClassDef(
         vgdl_names=('ShootEverywhereAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4, can_shoot=True, shoot_everywhere=True,
+        is_oriented=True,
     ),
     SpriteClass.AIMED_AVATAR: SpriteClassDef(
         vgdl_names=('AimedAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=2, can_shoot=True, is_aimed=True,
+        is_oriented=True,
     ),
     SpriteClass.AIMED_FLAK_AVATAR: SpriteClassDef(
         vgdl_names=('AimedFlakAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4, can_shoot=True, is_aimed=True, can_move_aimed=True,
+        is_oriented=True,
     ),
 }
 

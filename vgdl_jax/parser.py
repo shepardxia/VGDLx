@@ -248,7 +248,9 @@ def _parse_terminations(nodes):
 def _build_sprite_def(key, class_name, args, stypes, type_idx):
     """Convert parsed sprite data into a SpriteDef."""
     # Map class name to SpriteClass enum
-    sc = CLASS_MAP.get(class_name, SpriteClass.IMMOVABLE)
+    sc = CLASS_MAP.get(class_name)
+    if sc is None:
+        raise ValueError(f"Unknown sprite class '{class_name}'")
 
     # Extract known parameters with class-based defaults
     # In py-vgdl: MovingAvatar, RandomNPC, Chaser, Fleeing, Missile, Walker, Bomber
@@ -384,7 +386,9 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
 
 def _build_effect_def(actor, actee, effect_name, kwargs):
     """Convert parsed effect data into an EffectDef."""
-    et = VGDL_TO_KEY.get(effect_name, 'null')
+    et = VGDL_TO_KEY.get(effect_name)
+    if et is None:
+        raise ValueError(f"Unknown effect '{effect_name}'")
     score_change = int(kwargs.get('scoreChange', 0))
 
     # Pass through all kwargs except scoreChange — let _compile_effect_kwargs
@@ -449,13 +453,7 @@ def _build_termination_def(class_name, kwargs):
             },
         )
     else:
-        # Unknown termination — treat as timeout with limit=0
-        return TerminationDef(
-            term_type=TerminationType.TIMEOUT,
-            win=bool(kwargs.get('win', False)),
-            score_change=int(kwargs.get('scoreChange', 0)),
-            kwargs={'limit': int(kwargs.get('limit', 0))},
-        )
+        raise ValueError(f"Unknown termination class '{class_name}'")
 
 
 # ── Level parser ──────────────────────────────────────────────────────
