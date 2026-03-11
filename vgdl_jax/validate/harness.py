@@ -413,7 +413,8 @@ def run_comparison(entry: GameEntry, actions, seed=42, use_rng_replay=False, lev
 # ── GVGAI comparison ─────────────────────────────────────────────────
 
 
-def run_gvgai_comparison(entry: GameEntry, actions, seed=42, level_idx=0):
+def run_gvgai_comparison(entry: GameEntry, actions, seed=42, level_idx=0,
+                         use_rng_replay=False):
     """Run GVGAI and VGDLx on same actions, compare state at every step.
 
     Args:
@@ -421,36 +422,64 @@ def run_gvgai_comparison(entry: GameEntry, actions, seed=42, level_idx=0):
         actions: list of int action indices (VGDLx convention)
         seed: random seed
         level_idx: which level to use
+        use_rng_replay: if True, run VGDLx first to record RNG choices,
+            then inject them into GVGAI so both engines make identical
+            random decisions (directions, spawn rolls).
 
     Returns:
         TrajectoryResult with per-step StepComparison.
     """
     from .backend_gvgai import run_gvgai_trajectory, normalize_gvgai_state
+    from .state_extractor import extract_jax_state
 
-    # ── Run JAX side (reuse run_jax_trajectory) ──
     compiled, game_def = setup_jax_game(entry, level_idx)
-    jax_states = run_jax_trajectory(entry, actions, seed, level_idx)
+    sgm = compiled.static_grid_map
 
-    # ── Run GVGAI side ──
-    gvgai_raw = run_gvgai_trajectory(
-        entry, actions, seed=seed, level_idx=level_idx,
-        action_names=compiled.action_names,
-    )
-    gvgai_states = [normalize_gvgai_state(s, game_def) for s in gvgai_raw]
+    # ── Run JAX side + optionally build RNG replay ──
+    rng_file_path = None
+    if use_rng_replay:
+        from .rng_replay import build_gvgai_rng_records, write_gvgai_rng_file
+        import tempfile
 
-    # ── Compare step by step ──
-    step_comparisons = []
-    n_steps = min(len(jax_states), len(gvgai_states))
-    for i in range(n_steps):
-        action = actions[i - 1] if i > 0 and i - 1 < len(actions) else -1
-        matches, diffs = compare_states(gvgai_states[i], jax_states[i])
-        step_comparisons.append(StepComparison(
-            step=i, action=action,
-            state_a=gvgai_states[i], state_b=jax_states[i],
-            matches=matches, diffs=diffs,
-        ))
+        # Single trajectory run: produces both RNG records and raw states
+        records, raw_states = build_gvgai_rng_records(
+            compiled, game_def, actions, seed)
+        jax_states = [extract_jax_state(s, game_def, static_grid_map=sgm)
+                      for s in raw_states]
 
-    return _build_trajectory_result(entry, actions, step_comparisons)
+        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+        rng_file_path = tmp.name
+        tmp.close()
+        write_gvgai_rng_file(records, rng_file_path)
+    else:
+        jax_states = run_jax_trajectory(entry, actions, seed, level_idx)
+
+    try:
+        # ── Run GVGAI side ──
+        gvgai_raw = run_gvgai_trajectory(
+            entry, actions, seed=seed, level_idx=level_idx,
+            action_names=compiled.action_names,
+            rng_file=rng_file_path,
+        )
+        gvgai_states = [normalize_gvgai_state(s, game_def) for s in gvgai_raw]
+
+        # ── Compare step by step ──
+        step_comparisons = []
+        n_steps = min(len(jax_states), len(gvgai_states))
+        for i in range(n_steps):
+            action = actions[i - 1] if i > 0 and i - 1 < len(actions) else -1
+            matches, diffs = compare_states(gvgai_states[i], jax_states[i])
+            step_comparisons.append(StepComparison(
+                step=i, action=action,
+                state_a=gvgai_states[i], state_b=jax_states[i],
+                matches=matches, diffs=diffs,
+            ))
+
+        return _build_trajectory_result(entry, actions, step_comparisons)
+
+    finally:
+        if rng_file_path and os.path.exists(rng_file_path):
+            os.unlink(rng_file_path)
 
 
 def _build_trajectory_result(entry, actions, step_comparisons):

@@ -13,7 +13,7 @@ from vgdl_jax.collision import detect_eos, in_bounds
 from vgdl_jax.data_model import SpriteClass, STATIC_CLASSES, AVATAR_CLASSES, AABB_THRESHOLD, PHYSICS_CONTINUOUS, PHYSICS_GRAVITY
 from vgdl_jax.effects import apply_masked_effect, apply_static_a_effect, POSITION_MODIFYING_EFFECTS, PARTNER_IDX_EFFECTS
 from vgdl_jax.sprites import (
-    DIRECTION_DELTAS, spawn_sprite,
+    DIRECTION_DELTAS, spawn_sprite, snap_to_pixel_grid,
     update_inertial_avatar, update_mario_avatar,
     update_missile, update_erratic_missile, update_random_npc,
     update_random_inertial, update_spreader, update_chaser,
@@ -111,6 +111,7 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
     max_n = params['max_n']
     height = params['height']
     width = params['width']
+    block_size = params.get('block_size', 0)
 
     # Distance field caching: separate static (precomputed) from dynamic (per-step)
     _static_distance_fields = static_distance_fields or {}
@@ -163,11 +164,14 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                 gravity=avatar_config.gravity,
                 airsteering=avatar_config.airsteering)
         elif avatar_config.is_aimed:
-            state = _update_aimed_avatar(state, action, avatar_config, height, width)
+            state = _update_aimed_avatar(state, action, avatar_config, height, width,
+                                         block_size=block_size)
         elif avatar_config.is_rotating:
-            state = _update_rotating_avatar(state, action, avatar_config, height, width)
+            state = _update_rotating_avatar(state, action, avatar_config, height, width,
+                                             block_size=block_size)
         else:
-            state = _update_avatar(state, action, avatar_config, height, width)
+            state = _update_avatar(state, action, avatar_config, height, width,
+                                   block_size=block_size)
 
         # 3. Update NPC sprites
         # Precompute distance fields — one per unique target, not per chaser type
@@ -187,9 +191,12 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                     state, type_idx, cfg.target_type_idx, cfg.cooldown,
                     fleeing=(cfg.sprite_class == SpriteClass.FLEEING),
                     height=height, width=width,
-                    dist_field=dist_fields.get(cfg.target_type_idx))
+                    dist_field=dist_fields.get(cfg.target_type_idx),
+                    block_size=block_size)
             else:
-                state = _update_npc(state, type_idx, cfg, height, width)
+                state = _update_npc(state, type_idx, cfg, height, width,
+                                    block_size=block_size)
+
 
         # 4. Age sprites and kill expired flickers
         new_ages = jnp.where(state.alive, state.ages + 1, state.ages)
@@ -708,9 +715,8 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
 # ── Avatar and NPC update ─────────────────────────────────────────────
 
 
-def _update_avatar(state, action, cfg, height, width):
-    """Update avatar position and optionally shoot."""
-    avatar_type = cfg.avatar_type_idx
+def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_size=0):
+    """Update a single avatar type's position and optionally shoot."""
     n_move = cfg.n_move_actions
     cooldown = cfg.cooldown
     direction_offset = cfg.direction_offset
@@ -725,9 +731,13 @@ def _update_avatar(state, action, cfg, height, width):
         lambda: jnp.array([0.0, 0.0], dtype=jnp.float32))
 
     can_move = state.cooldown_timers[avatar_type, 0] >= cooldown
-    should_move = is_move & can_move
+    # Gate on alive: only move if this avatar type is alive
+    is_alive = state.alive[avatar_type, 0]
+    should_move = is_move & can_move & is_alive
     speed = state.speeds[avatar_type, 0]
     new_pos = state.positions[avatar_type, 0] + delta * speed * should_move
+    if block_size > 0:
+        new_pos = snap_to_pixel_grid(new_pos, block_size)
 
     state = state.replace(
         positions=state.positions.at[avatar_type, 0].set(new_pos),
@@ -747,7 +757,7 @@ def _update_avatar(state, action, cfg, height, width):
 
     # Shoot
     if cfg.can_shoot:
-        is_shoot = (action == cfg.shoot_action_idx)
+        is_shoot = (action == cfg.shoot_action_idx) & is_alive
         proj_type = cfg.projectile_type_idx
         proj_speed = cfg.projectile_speed
 
@@ -778,6 +788,25 @@ def _update_avatar(state, action, cfg, height, width):
     return state
 
 
+def _update_avatar(state, action, cfg, height, width, block_size=0):
+    """Update avatar position and optionally shoot.
+
+    When there are multiple avatar subtypes (cfg.avatar_type_indices has >1
+    entry), iterates over all at compile time. Only the alive subtype moves.
+    """
+    avatar_types = cfg.avatar_type_indices
+    if len(avatar_types) <= 1:
+        # Single avatar type (common case)
+        return _update_avatar_single(
+            state, action, cfg, cfg.avatar_type_idx, height, width, block_size)
+    else:
+        # Multiple avatar subtypes — update whichever is alive
+        for at in avatar_types:
+            state = _update_avatar_single(
+                state, action, cfg, at, height, width, block_size)
+        return state
+
+
 def _maybe_shoot(state, action, cfg, avatar_type):
     """Conditionally spawn projectile using avatar's current orientation."""
     is_shoot = (action == cfg.shoot_action_idx)
@@ -792,7 +821,7 @@ def _maybe_shoot(state, action, cfg, avatar_type):
     )
 
 
-def _update_aimed_avatar(state, action, cfg, height, width):
+def _update_aimed_avatar(state, action, cfg, height, width, block_size=0):
     """Update AimedAvatar / AimedFlakAvatar: continuous-angle aiming + optional horizontal movement.
 
     AimedAvatar: AIM_UP=0, AIM_DOWN=1, SHOOT=n_move, NOOP=n_move+1
@@ -814,6 +843,8 @@ def _update_aimed_avatar(state, action, cfg, height, width):
         is_aim_down = (action == 3)
         h_delta = jnp.where(is_left, -1.0, jnp.where(is_right, 1.0, 0.0))
         new_pos = pos.at[1].add(h_delta)
+        if block_size > 0:
+            new_pos = snap_to_pixel_grid(new_pos, block_size)
     else:
         # AimedAvatar: actions 0,1 = AIM_UP,AIM_DOWN
         is_aim_up = (action == 0)
@@ -843,7 +874,7 @@ def _update_aimed_avatar(state, action, cfg, height, width):
     return state
 
 
-def _update_rotating_avatar(state, action, cfg, height, width):
+def _update_rotating_avatar(state, action, cfg, height, width, block_size=0):
     """Update rotating avatar: ego-centric forward/backward + rotation.
 
     Actions:
@@ -898,6 +929,9 @@ def _update_rotating_avatar(state, action, cfg, height, width):
                                     state.positions[avatar_type, 0]))
         new_ori = ori
 
+    if block_size > 0:
+        new_pos = snap_to_pixel_grid(new_pos, block_size)
+
     # Action 2: CCW rotation
     # In our BASEDIRS: UP=0,DOWN=1,LEFT=2,RIGHT=3
     # CCW: UP→LEFT→DOWN→RIGHT→UP
@@ -924,7 +958,7 @@ def _update_rotating_avatar(state, action, cfg, height, width):
     return state
 
 
-def _npc_spawn_point(state, type_idx, cfg, height, width):
+def _npc_spawn_point(state, type_idx, cfg, height, width, block_size):
     return update_spawn_point(
         state, type_idx, cfg.cooldown, prob=cfg.prob, total=cfg.total,
         target_type=cfg.target_type_idx,
@@ -932,8 +966,8 @@ def _npc_spawn_point(state, type_idx, cfg, height, width):
         target_speed=cfg.target_speed)
 
 
-def _npc_bomber(state, type_idx, cfg, height, width):
-    state = update_missile(state, type_idx, cfg.cooldown)
+def _npc_bomber(state, type_idx, cfg, height, width, block_size):
+    state = update_missile(state, type_idx, cfg.cooldown, block_size=block_size)
     return update_spawn_point(
         state, type_idx, cooldown=cfg.spawn_cooldown, prob=cfg.prob,
         total=cfg.total, target_type=cfg.target_type_idx,
@@ -942,25 +976,25 @@ def _npc_bomber(state, type_idx, cfg, height, width):
 
 
 _NPC_UPDATERS = {
-    SpriteClass.MISSILE: lambda s, ti, cfg, h, w: update_missile(s, ti, cfg.cooldown),
-    SpriteClass.ERRATIC_MISSILE: lambda s, ti, cfg, h, w: update_erratic_missile(s, ti, cfg.cooldown, prob=cfg.prob),
-    SpriteClass.RANDOM_NPC: lambda s, ti, cfg, h, w: update_random_npc(s, ti, cfg.cooldown, cons=cfg.cons),
+    SpriteClass.MISSILE: lambda s, ti, cfg, h, w, bs: update_missile(s, ti, cfg.cooldown, block_size=bs),
+    SpriteClass.ERRATIC_MISSILE: lambda s, ti, cfg, h, w, bs: update_erratic_missile(s, ti, cfg.cooldown, prob=cfg.prob, block_size=bs),
+    SpriteClass.RANDOM_NPC: lambda s, ti, cfg, h, w, bs: update_random_npc(s, ti, cfg.cooldown, cons=cfg.cons, block_size=bs),
     # CHASER and FLEEING handled inline in _step_inner with precomputed dist_fields
-    SpriteClass.FLICKER: lambda s, ti, cfg, h, w: s,
-    SpriteClass.ORIENTED_FLICKER: lambda s, ti, cfg, h, w: s,
+    SpriteClass.FLICKER: lambda s, ti, cfg, h, w, bs: s,
+    SpriteClass.ORIENTED_FLICKER: lambda s, ti, cfg, h, w, bs: s,
     SpriteClass.SPAWN_POINT: _npc_spawn_point,
     SpriteClass.BOMBER: _npc_bomber,
-    SpriteClass.WALKER: lambda s, ti, cfg, h, w: update_missile(s, ti, cfg.cooldown),
-    SpriteClass.SPREADER: lambda s, ti, cfg, h, w: update_spreader(s, ti, spreadprob=cfg.spreadprob),
-    SpriteClass.RANDOM_INERTIAL: lambda s, ti, cfg, h, w: update_random_inertial(s, ti, mass=cfg.mass, strength=cfg.strength),
-    SpriteClass.RANDOM_MISSILE: lambda s, ti, cfg, h, w: update_missile(s, ti, cfg.cooldown),
-    SpriteClass.WALK_JUMPER: lambda s, ti, cfg, h, w: update_walk_jumper(s, ti, prob=cfg.prob, strength=cfg.strength, gravity=cfg.gravity, mass=cfg.mass),
+    SpriteClass.WALKER: lambda s, ti, cfg, h, w, bs: update_missile(s, ti, cfg.cooldown, block_size=bs),
+    SpriteClass.SPREADER: lambda s, ti, cfg, h, w, bs: update_spreader(s, ti, spreadprob=cfg.spreadprob),
+    SpriteClass.RANDOM_INERTIAL: lambda s, ti, cfg, h, w, bs: update_random_inertial(s, ti, mass=cfg.mass, strength=cfg.strength),
+    SpriteClass.RANDOM_MISSILE: lambda s, ti, cfg, h, w, bs: update_missile(s, ti, cfg.cooldown, block_size=bs),
+    SpriteClass.WALK_JUMPER: lambda s, ti, cfg, h, w, bs: update_walk_jumper(s, ti, prob=cfg.prob, strength=cfg.strength, gravity=cfg.gravity, mass=cfg.mass),
 }
 
 
-def _update_npc(state, type_idx, cfg, height, width):
+def _update_npc(state, type_idx, cfg, height, width, block_size=0):
     """Update a single NPC type based on its sprite class."""
     updater = _NPC_UPDATERS.get(cfg.sprite_class)
     if updater is not None:
-        return updater(state, type_idx, cfg, height, width)
+        return updater(state, type_idx, cfg, height, width, block_size)
     return state

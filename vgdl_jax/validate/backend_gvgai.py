@@ -42,12 +42,20 @@ def _ensure_runner(classpath):
         return
     os.makedirs(_RUNNER_DIR, exist_ok=True)
     runner_code = f"""
+import tools.ReplayRNG;
 import tracks.ArcadeMachine;
 public class TraceRunner {{
     public static void main(String[] args) {{
         String game = args[0];
         String level = args[1];
         int seed = Integer.parseInt(args[2]);
+
+        // Load RNG replay if provided
+        String rngFile = System.getProperty("rng.replay.file", "");
+        if (!rngFile.isEmpty()) {{
+            ReplayRNG.loadFromFile(rngFile);
+        }}
+
         String agent = "{_TRACE_AGENT}";
         ArcadeMachine.runOneGame(game, level, false, agent, null, seed, 0);
     }}
@@ -74,7 +82,8 @@ def _build_classpath():
 
 def run_gvgai_trajectory(entry: GameEntry, actions: list, seed: int = 42,
                           level_idx: int = 0,
-                          action_names: tuple = ()) -> list:
+                          action_names: tuple = (),
+                          rng_file: str = None) -> list:
     """Run GVGAI via subprocess with TraceAgent, return list of state dicts.
 
     Args:
@@ -83,6 +92,7 @@ def run_gvgai_trajectory(entry: GameEntry, actions: list, seed: int = 42,
         seed: random seed
         level_idx: which level to use
         action_names: tuple of GVGAI action name strings in order
+        rng_file: optional path to RNG replay JSON file for deterministic injection
 
     Returns:
         list of dicts, each with:
@@ -108,13 +118,20 @@ def run_gvgai_trajectory(entry: GameEntry, actions: list, seed: int = 42,
 
     try:
         run_cp = os.pathsep.join([_RUNNER_DIR, classpath])
+        java_args = [
+            'java', '-Djava.awt.headless=true',
+            f'-Dactions.file={actions_file}',
+            f'-Dtrace.file={trace_file}',
+        ]
+        if rng_file:
+            java_args.append(f'-Drng.replay.file={rng_file}')
+        java_args += [
+            '-cp', run_cp,
+            'TraceRunner',
+            entry.game_file, entry.level_files[level_idx], str(seed),
+        ]
         run_result = subprocess.run(
-            ['java', '-Djava.awt.headless=true',
-             f'-Dactions.file={actions_file}',
-             f'-Dtrace.file={trace_file}',
-             '-cp', run_cp,
-             'TraceRunner',
-             entry.game_file, entry.level_files[level_idx], str(seed)],
+            java_args,
             capture_output=True, text=True, timeout=60,
             cwd=_GVGAI_DIR)
 

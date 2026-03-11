@@ -11,6 +11,28 @@ DIRECTION_DELTAS = jnp.array([[-1, 0], [1, 0], [0, -1], [0, 1]], dtype=jnp.float
 # ── Shared helpers ─────────────────────────────────────────────────────
 
 
+def snap_to_pixel_grid(pos, block_size):
+    """Snap float cell-coordinates to the nearest pixel-grid position.
+
+    GVGAI stores positions as integer pixels (rect.x, rect.y). After each
+    movement, positions are inherently on the pixel grid. VGDLx uses float32
+    cell coordinates, so repeated additions of fractional displacements
+    (e.g., speed=0.6 → 16/28 cells per tick) accumulate rounding error.
+
+    This function rounds to the nearest pixel, then converts back to cells:
+        pos_cells = round(pos_cells * block_size) / block_size
+
+    Uses int32 intermediate to avoid float32 division precision errors
+    (e.g., float32(122.0 / 61.0) != 2.0 in JIT).
+    """
+    px = jnp.round(pos * block_size).astype(jnp.int32)
+    # Avoid float32 reciprocal imprecision: integer positions that are exact
+    # multiples of block_size must map back exactly. Use floor-division + remainder.
+    cells = px // block_size
+    rem = px % block_size
+    return cells.astype(jnp.float32) + rem.astype(jnp.float32) / jnp.float32(block_size)
+
+
 def prefix_sum_allocate(alive_mask, source_mask):
     """Allocate dead slots to sources using prefix-sum.
 
@@ -38,7 +60,8 @@ def prefix_sum_allocate(alive_mask, source_mask):
     return should_fill, src_indices
 
 
-def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True):
+def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True,
+                        block_size=0):
     """Apply cooldown-gated movement. Uses orientations if deltas is None.
 
     GVGAI has two movement paths:
@@ -48,6 +71,7 @@ def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True):
     Args:
         passive: If True, is_first_tick blocks movement (missile-style).
                  If False, is_first_tick is only cleared, not blocking (chaser-style).
+        block_size: If > 0, snap positions to pixel grid after movement (GridPhysics).
 
     Returns:
         (new_pos, new_timers, can_move, first_tick_mask)
@@ -61,6 +85,8 @@ def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True):
         deltas = state.orientations[type_idx]
     speed = state.speeds[type_idx]
     new_pos = state.positions[type_idx] + deltas * speed[:, None] * can_move[:, None]
+    if block_size > 0:
+        new_pos = snap_to_pixel_grid(new_pos, block_size)
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
     return new_pos, new_timers, can_move, first_tick
 
@@ -88,20 +114,22 @@ def _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=None, rng=None
 # ── NPC movement updates ──────────────────────────────────────────────
 
 
-def update_missile(state: GameState, type_idx, cooldown):
+def update_missile(state: GameState, type_idx, cooldown, block_size=0):
     """Move along fixed orientation each tick (if cooldown met and alive)."""
-    new_pos, new_timers, _, first_tick = _move_with_cooldown(state, type_idx, cooldown)
+    new_pos, new_timers, _, first_tick = _move_with_cooldown(
+        state, type_idx, cooldown, block_size=block_size)
     return _apply_npc_move(state, type_idx, new_pos, new_timers,
                            first_tick_mask=first_tick)
 
 
-def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
+def update_erratic_missile(state: GameState, type_idx, cooldown, prob, block_size=0):
     """Missile that randomly changes direction with probability `prob` each tick."""
     rng, key_move, key_dir = jax.random.split(state.rng, 3)
     max_n = state.alive.shape[1]
 
     # Move along current orientation (same as missile)
-    new_pos, new_timers, _, first_tick = _move_with_cooldown(state, type_idx, cooldown)
+    new_pos, new_timers, _, first_tick = _move_with_cooldown(
+        state, type_idx, cooldown, block_size=block_size)
 
     # Randomly change direction with probability `prob`
     should_change = (jax.random.uniform(key_move, (max_n,)) < prob) & state.alive[type_idx]
@@ -113,7 +141,7 @@ def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
                            first_tick_mask=first_tick)
 
 
-def update_random_npc(state: GameState, type_idx, cooldown, cons=0):
+def update_random_npc(state: GameState, type_idx, cooldown, cons=0, block_size=0):
     """Pick a random direction each move. cons>0 repeats direction for N ticks."""
     rng, key = jax.random.split(state.rng)
     max_n = state.alive.shape[1]
@@ -129,7 +157,8 @@ def update_random_npc(state: GameState, type_idx, cooldown, cons=0):
         deltas = random_deltas
         new_ticks = None
     new_pos, new_timers, can_move, first_tick = _move_with_cooldown(
-        state, type_idx, cooldown, deltas=deltas, passive=False)
+        state, type_idx, cooldown, deltas=deltas, passive=False,
+        block_size=block_size)
     new_ori = jnp.where(can_move[:, None], deltas, state.orientations[type_idx])
     state = _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng,
                             first_tick_mask=first_tick)
@@ -168,7 +197,8 @@ def _manhattan_distance_field(target_pos, target_alive, height, width):
 
 
 def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
-                  fleeing=False, height=0, width=0, dist_field=None):
+                  fleeing=False, height=0, width=0, dist_field=None,
+                  block_size=0):
     """Move toward (or away from) nearest target using grid distance field. O(H*W + N).
 
     In GVGAI, isFirstTick is cleared in updatePassive() but doesn't block the
@@ -199,10 +229,23 @@ def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
     d_right = jnp.where(c < width - 1,  dist_field[r, jnp.clip(c + 1, 0, width - 1)], INF)
 
     neighbor_dists = jnp.stack([d_up, d_down, d_left, d_right], axis=-1)  # [max_n, 4]
+
+    # GVGAI collects ALL directions that improve distance, then picks one
+    # randomly.  We match this by finding the best distance per sprite and
+    # randomly selecting among tied-best directions.
     if fleeing:
-        best_dir = jnp.argmax(neighbor_dists, axis=-1)
+        best_val = jnp.max(neighbor_dists, axis=-1, keepdims=True)  # [max_n, 1]
     else:
-        best_dir = jnp.argmin(neighbor_dists, axis=-1)
+        best_val = jnp.min(neighbor_dists, axis=-1, keepdims=True)
+    is_best = (neighbor_dists == best_val)  # [max_n, 4] bool — tied-best mask
+
+    # Gumbel-max trick: add large random noise only to tied-best directions,
+    # then argmax picks a random one among them.
+    rng, key_tie = jax.random.split(rng)
+    gumbel = jax.random.uniform(key_tie, neighbor_dists.shape)  # [max_n, 4]
+    # Set non-best directions to -1 so they never win argmax
+    tie_scores = jnp.where(is_best, gumbel, -1.0)
+    best_dir = jnp.argmax(tie_scores, axis=-1)
     delta = DIRECTION_DELTAS[best_dir]
 
     # If no targets alive, pick random direction
@@ -212,6 +255,8 @@ def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
 
     speed = state.speeds[type_idx]  # [max_n] float32
     new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None]
+    if block_size > 0:
+        new_pos = snap_to_pixel_grid(new_pos, block_size)
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
     new_ori = jnp.where(can_move[:, None], delta, state.orientations[type_idx])
     return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng,

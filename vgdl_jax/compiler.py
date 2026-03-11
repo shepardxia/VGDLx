@@ -21,6 +21,7 @@ from vgdl_jax.data_model import (
     PHYSICS_CONTINUOUS, PHYSICS_GRAVITY,
     effective_speed,
     GVGAI_ACTION_TO_DIR,
+    gvgai_block_size,
 )
 from vgdl_jax.effects import compile_effect_kwargs, CompileContext, ALIVE_MODIFYING_EFFECTS, POSITION_MODIFYING_EFFECTS
 from vgdl_jax.state import GameState, create_initial_state
@@ -49,12 +50,8 @@ def _resolve_first(game_def, stype, default=None):
 
 
 def _gvgai_block_size(height, width):
-    """Compute GVGAI's block_size from level dimensions.
-
-    GVGAI: max(2, (int)(800) / max(width, height)).
-    Note: GVGAI uses max(width, height), not max(height, width).
-    """
-    return max(2, 800 // max(width, height))
+    """Deprecated: use data_model.gvgai_block_size() instead."""
+    return gvgai_block_size(height, width)
 
 
 def _find_avatar(game_def):
@@ -63,6 +60,12 @@ def _find_avatar(game_def):
         if sd.sprite_class in AVATAR_CLASSES:
             return sd
     raise AssertionError("No avatar found in game definition")
+
+
+def _find_all_avatar_types(game_def):
+    """Find all avatar type indices (for games with multiple avatar subtypes)."""
+    return tuple(sd.type_idx for sd in game_def.sprites
+                 if sd.sprite_class in AVATAR_CLASSES)
 
 
 def _build_resource_registry(game_def):
@@ -169,7 +172,7 @@ def _select_collision_mode(a_static, b_static, a_frac, b_frac, speed_a, speed_b)
         return 'grid'
 
 
-def _build_avatar_config(avatar_sd, game_def, block_size):
+def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()):
     """Build AvatarConfig, n_actions, and n_move from the avatar SpriteDef."""
     sc_def = SPRITE_REGISTRY[avatar_sd.sprite_class]
     n_move = sc_def.n_move_actions
@@ -218,6 +221,7 @@ def _build_avatar_config(avatar_sd, game_def, block_size):
         is_aimed=sc_def.is_aimed,
         can_move_aimed=sc_def.can_move_aimed,
         angle_diff=avatar_sd.angle_diff,
+        avatar_type_indices=avatar_type_indices,
     )
     return avatar_config, n_move
 
@@ -568,16 +572,25 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
             init_timer = 0
         # Moving NPCs get is_first_tick=True (GVGAI isFirstTick blocks passiveMovement)
         init_first_tick = (sc_def is not None and sc_def.is_moving_npc)
+        # RandomNPC cons initialization: GVGAI starts with prevAction=DNONE,
+        # counter=0 (before cons is parsed). First `cons` calls to getRandomMove()
+        # return DNONE (no movement). Match by setting direction_ticks=cons and
+        # orientation=(0,0) so the "keep" branch produces zero delta.
+        init_dir_ticks = sd.cons if sd.sprite_class == SpriteClass.RANDOM_NPC and sd.cons > 0 else 0
+        init_ori = ([0.0, 0.0] if sd.sprite_class == SpriteClass.RANDOM_NPC and sd.cons > 0
+                    else sd.orientation)
         state = state.replace(
             positions=state.positions.at[type_idx, slot].set(
                 jnp.array([row, col], dtype=jnp.float32)),
             alive=state.alive.at[type_idx, slot].set(True),
             orientations=state.orientations.at[type_idx, slot].set(
-                jnp.array(sd.orientation, dtype=jnp.float32)),
+                jnp.array(init_ori, dtype=jnp.float32)),
             speeds=state.speeds.at[type_idx, slot].set(jnp.float32(eff_speed)),
             cooldown_timers=state.cooldown_timers.at[type_idx, slot].set(
                 jnp.int32(init_timer)),
             is_first_tick=state.is_first_tick.at[type_idx, slot].set(init_first_tick),
+            direction_ticks=state.direction_ticks.at[type_idx, slot].set(
+                jnp.int32(init_dir_ticks)),
         )
         slot_counts[type_idx] += 1
     state = state.replace(static_grids=jnp.array(static_grid_data))
@@ -594,7 +607,10 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
                     orientations=state.orientations.at[
                         sd.type_idx, :n_placed].set(DIRECTION_DELTAS[dir_indices]))
 
-    avatar_config, n_move = _build_avatar_config(avatar_sd, game_def, block_size)
+    all_avatar_types = _find_all_avatar_types(game_def)
+    avatar_config, n_move = _build_avatar_config(
+        avatar_sd, game_def, block_size,
+        avatar_type_indices=all_avatar_types)
 
     # Build GVGAI action map
     sc_def = SPRITE_REGISTRY[avatar_sd.sprite_class]
@@ -642,7 +658,8 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
     # Build step function
     params = dict(n_types=n_types, max_n=max_n, height=height, width=width,
                   n_resource_types=max(n_resource_types, 1),
-                  resource_limits=resource_limits)
+                  resource_limits=resource_limits,
+                  block_size=block_size)
     step_fn = build_step_fn(compiled_effects, compiled_terminations,
                             sprite_configs, avatar_config, params,
                             chaser_target_set=frozenset(chaser_target_set),

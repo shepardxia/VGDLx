@@ -71,7 +71,7 @@ def _classify_result(result):
 
 
 def validate_game(entry: GameEntry, n_steps=30, seed=42, render_diffs=False,
-                   output_dir=None, backend='pyvgdl'):
+                   output_dir=None, backend='pyvgdl', use_rng_replay=False):
     """Run all 3 trajectory types for a single game.
 
     Args:
@@ -81,6 +81,7 @@ def validate_game(entry: GameEntry, n_steps=30, seed=42, render_diffs=False,
         render_diffs: generate visual diff artifacts
         output_dir: output directory for artifacts
         backend: 'pyvgdl' for py-vgdl comparison, 'gvgai' for GVGAI comparison
+        use_rng_replay: inject VGDLx RNG into reference engine for deterministic comparison
 
     Returns:
         dict with keys: status, trajectories, errors, timing
@@ -114,7 +115,8 @@ def validate_game(entry: GameEntry, n_steps=30, seed=42, render_diffs=False,
                                     noop_idx=noop_idx)
 
             if backend == 'gvgai':
-                result = run_gvgai_comparison(entry, actions, seed=seed)
+                result = run_gvgai_comparison(entry, actions, seed=seed,
+                                              use_rng_replay=use_rng_replay)
             else:
                 # Stochastic games use RNG replay; sokoban is deterministic
                 use_rng = entry.name != "sokoban"
@@ -553,6 +555,10 @@ def main():
         "--render-diffs", action="store_true",
         help="Generate PNG/GIF artifacts at divergence points",
     )
+    parser.add_argument(
+        "--rng-replay", action="store_true",
+        help="Inject VGDLx RNG into reference engine for deterministic comparison",
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir or OUTPUT_DIR
@@ -614,7 +620,8 @@ def main():
         print(f"  Validating {game_name}...", end="", flush=True)
         result = validate_game(entry, n_steps=args.steps, seed=args.seed,
                                render_diffs=args.render_diffs,
-                               output_dir=output_dir, backend=backend)
+                               output_dir=output_dir, backend=backend,
+                               use_rng_replay=args.rng_replay)
         all_results[game_name] = result
         icon = {"match": "ok", "state_error": "FAIL", "compile_error": "ERROR"}
         print(f" {icon.get(result['status'], '?')} ({result['timing_s']:.1f}s)")

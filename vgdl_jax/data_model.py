@@ -20,6 +20,15 @@ PHYSICS_CONTINUOUS = 'continuous'
 PHYSICS_GRAVITY = 'gravity'
 
 
+def gvgai_block_size(height, width):
+    """Compute GVGAI's block_size from level dimensions.
+
+    GVGAI: max(2, (int)(800) / max(width, height)).
+    Note: GVGAI uses max(width, height), not max(height, width).
+    """
+    return max(2, 800 // max(width, height))
+
+
 class SpriteClass(enum.IntEnum):
     IMMOVABLE = 0
     MISSILE = 1
@@ -453,6 +462,9 @@ class AvatarConfig:
     is_aimed: bool = False
     can_move_aimed: bool = False
     angle_diff: float = 0.05
+    # All avatar type indices (for games with multiple avatar subtypes like tercio).
+    # When set, avatar movement is applied to whichever subtype is alive.
+    avatar_type_indices: Tuple[int, ...] = ()
 
 
 @dataclass

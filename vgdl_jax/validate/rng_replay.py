@@ -335,3 +335,155 @@ class ReplayRandomGenerator:
     def seed(self, s):
         """No-op for compatibility with game.set_seed()."""
         pass
+
+
+# ── GVGAI RNG Injection ─────────────────────────────────────────────
+
+# Orientation (row, col) → DBASEDIRS index.
+# DBASEDIRS: [DUP(0,-1), DLEFT(-1,0), DDOWN(0,1), DRIGHT(1,0)]
+# In (row, col): UP=(-1,0)→0, DOWN=(1,0)→2, LEFT=(0,-1)→1, RIGHT=(0,1)→3
+_ORI_TO_BASEDIRS = {(-1, 0): 0, (0, -1): 1, (1, 0): 2, (0, 1): 3}
+
+
+def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
+                           spawn_target_map=None):
+    """Build one step's GVGAI RNG injection record from VGDLx state transition.
+
+    For direction-consuming sprites (RandomNPC, Chaser, Fleeing):
+      Extract effective direction from post-step orientation.
+
+    For spawn-consuming sprites (SpawnPoint, Bomber):
+      Compare pre/post alive counts to determine spawn outcome.
+
+    Args:
+        pre_state: GameState before step
+        post_state: GameState after step
+        game_def: GameDef for sprite metadata
+        block_size: GVGAI pixel block size
+        spawn_target_map: optional dict {type_idx: target_type_idx} for spawn outcome detection
+
+    Returns:
+        dict: {sprite_key: [{"pos": [py, px], "dir": int}, ...]}
+        dir is DBASEDIRS index (0-3) or -1 for DNONE.
+    """
+    from vgdl_jax.data_model import SPRITE_REGISTRY
+
+    record = {}
+
+    # Bulk-convert JAX arrays to numpy once (avoids per-element device→host transfers)
+    pre_alive = np.array(pre_state.alive)
+    pre_pos = np.array(pre_state.positions)
+    post_ori = np.array(post_state.orientations)
+    post_alive = np.array(post_state.alive)
+
+    for sd in game_def.sprites:
+        ti = sd.type_idx
+        sc = sd.sprite_class
+        sc_def = SPRITE_REGISTRY.get(sc)
+        if sc_def is None:
+            continue
+
+        # Direction-consuming NPC types
+        if sc in (SpriteClass.RANDOM_NPC, SpriteClass.CHASER, SpriteClass.FLEEING):
+            alive_mask = pre_alive[ti]
+            slots = np.where(alive_mask)[0]
+            if len(slots) == 0:
+                continue
+            entries = []
+            for slot in slots:
+                r, c = pre_pos[ti, slot, 0], pre_pos[ti, slot, 1]
+                ori_r, ori_c = post_ori[ti, slot, 0], post_ori[ti, slot, 1]
+                basedirs_idx = _ORI_TO_BASEDIRS.get(
+                    (round(float(ori_r)), round(float(ori_c))), -1)
+                entries.append({
+                    "pos": [float(r) * block_size, float(c) * block_size],
+                    "dir": basedirs_idx,
+                })
+            record[sd.key] = entries
+
+        # Spawn-consuming types
+        elif sc in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
+            alive_mask = pre_alive[ti]
+            slots = np.where(alive_mask)[0]
+            if len(slots) == 0:
+                continue
+
+            # Detect spawn outcome from target type alive count change
+            target_ti = spawn_target_map.get(ti) if spawn_target_map else None
+            if target_ti is not None:
+                pre_count = int(pre_alive[target_ti].sum())
+                post_count = int(post_alive[target_ti].sum())
+                spawned = post_count > pre_count
+                roll = 0.0 if spawned else 1.0
+            else:
+                roll = 0.0  # no target info — default to spawn succeeds
+
+            entries = []
+            for slot in slots:
+                r, c = pre_pos[ti, slot, 0], pre_pos[ti, slot, 1]
+                entries.append({
+                    "pos": [float(r) * block_size, float(c) * block_size],
+                    "roll": roll,
+                })
+            record[sd.key] = entries
+
+    return record
+
+
+def build_gvgai_rng_records(compiled, game_def, actions, seed=42):
+    """Run VGDLx trajectory and build per-step GVGAI RNG injection records.
+
+    Args:
+        compiled: CompiledGame from compile_game()
+        game_def: GameDef
+        actions: list of int action indices
+        seed: random seed
+
+    Returns:
+        (records, raw_states) where records is a list of dicts (one per step)
+        and raw_states is the list of GameState objects [init, step1, step2, ...].
+    """
+    import jax
+    from vgdl_jax.data_model import gvgai_block_size
+
+    h = game_def.level.height
+    w = game_def.level.width
+    block_size = (game_def.square_size if game_def.square_size > 0
+                  else gvgai_block_size(h, w))
+
+    # Build spawn target map: {spawner_type_idx: target_type_idx}
+    spawn_target_map = {}
+    for sd in game_def.sprites:
+        if sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
+            if sd.spawner_stype:
+                targets = game_def.resolve_stype(sd.spawner_stype)
+                if targets:
+                    spawn_target_map[sd.type_idx] = targets[0]
+
+    state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
+    raw_states = [state]
+    records = []
+
+    for action in actions:
+        if bool(state.done):
+            break
+        pre_state = state
+        state = compiled.step_fn(pre_state, action)
+        raw_states.append(state)
+        record = build_gvgai_rng_record(pre_state, state, game_def, block_size,
+                                        spawn_target_map=spawn_target_map)
+        records.append(record)
+
+    return records, raw_states
+
+
+def write_gvgai_rng_file(records, path):
+    """Write GVGAI RNG injection records to JSON file.
+
+    Args:
+        records: list of dicts from build_gvgai_rng_records()
+        path: output file path
+    """
+    import json
+    with open(path, 'w') as f:
+        json.dump(records, f)
