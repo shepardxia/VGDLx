@@ -65,6 +65,16 @@ class TerminationType(enum.IntEnum):
     RESOURCE_COUNTER = 3
 
 
+# GVGAI action name → DIRECTION_DELTAS index
+# DIRECTION_DELTAS = [UP(-1,0), DOWN(1,0), LEFT(0,-1), RIGHT(0,1)]
+GVGAI_ACTION_TO_DIR = {
+    'ACTION_UP': 0,
+    'ACTION_DOWN': 1,
+    'ACTION_LEFT': 2,
+    'ACTION_RIGHT': 3,
+}
+
+
 @dataclass(frozen=True)
 class SpriteClassDef:
     vgdl_names: tuple               # VGDL parser names, e.g. ('Missile',)
@@ -84,6 +94,7 @@ class SpriteClassDef:
     shoot_everywhere: bool = False
     is_aimed: bool = False
     can_move_aimed: bool = False
+    gvgai_actions: tuple = ()       # GVGAI actionsNIL ordering as action name strings
 
 
 # ---------------------------------------------------------------------------
@@ -195,56 +206,66 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         vgdl_names=('MovingAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4,
+        gvgai_actions=('ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
     ),
     SpriteClass.FLAK_AVATAR: SpriteClassDef(
         vgdl_names=('FlakAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=2, can_shoot=True, is_horizontal=True,
         is_oriented=True,
+        gvgai_actions=('ACTION_USE', 'ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_NIL'),
     ),
     SpriteClass.SHOOT_AVATAR: SpriteClassDef(
         vgdl_names=('ShootAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4, can_shoot=True,
         is_oriented=True,
+        gvgai_actions=('ACTION_USE', 'ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
     ),
     SpriteClass.HORIZONTAL_AVATAR: SpriteClassDef(
         vgdl_names=('HorizontalAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=2, is_horizontal=True,
+        gvgai_actions=('ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_NIL'),
     ),
     SpriteClass.ORIENTED_AVATAR: SpriteClassDef(
         vgdl_names=('OrientedAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4,
         is_oriented=True,
+        gvgai_actions=('ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
     ),
     SpriteClass.VERTICAL_AVATAR: SpriteClassDef(
         vgdl_names=('VerticalAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=2,
+        gvgai_actions=('ACTION_UP', 'ACTION_DOWN', 'ACTION_NIL'),
     ),
     SpriteClass.INERTIAL_AVATAR: SpriteClassDef(
         vgdl_names=('InertialAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4, physics_type=PHYSICS_CONTINUOUS,
+        gvgai_actions=('ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
     ),
     SpriteClass.MARIO_AVATAR: SpriteClassDef(
         vgdl_names=('MarioAvatar',),
         is_avatar=True, default_speed=1.0,
-        n_move_actions=5, physics_type=PHYSICS_GRAVITY,
+        n_move_actions=2, physics_type=PHYSICS_GRAVITY,
+        gvgai_actions=('ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_USE', 'ACTION_NIL'),
     ),
     SpriteClass.ROTATING_AVATAR: SpriteClassDef(
         vgdl_names=('RotatingAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4, is_rotating=True,
         is_oriented=True,
+        gvgai_actions=('ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
     ),
     SpriteClass.ROTATING_FLIPPING_AVATAR: SpriteClassDef(
         vgdl_names=('RotatingFlippingAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4, is_rotating=True, is_flipping=True,
         is_oriented=True,
+        gvgai_actions=('ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
     ),
     SpriteClass.NOISY_ROTATING_FLIPPING_AVATAR: SpriteClassDef(
         vgdl_names=('NoisyRotatingFlippingAvatar',),
@@ -252,24 +273,28 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         n_move_actions=4, is_rotating=True, is_flipping=True,
         noise_level=NOISY_AVATAR_NOISE_LEVEL,
         is_oriented=True,
+        gvgai_actions=('ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
     ),
     SpriteClass.SHOOT_EVERYWHERE_AVATAR: SpriteClassDef(
         vgdl_names=('ShootEverywhereAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4, can_shoot=True, shoot_everywhere=True,
         is_oriented=True,
+        gvgai_actions=('ACTION_USE', 'ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
     ),
     SpriteClass.AIMED_AVATAR: SpriteClassDef(
         vgdl_names=('AimedAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=2, can_shoot=True, is_aimed=True,
         is_oriented=True,
+        gvgai_actions=('ACTION_USE', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
     ),
     SpriteClass.AIMED_FLAK_AVATAR: SpriteClassDef(
         vgdl_names=('AimedFlakAvatar',),
         is_avatar=True, default_speed=1.0,
         n_move_actions=4, can_shoot=True, is_aimed=True, can_move_aimed=True,
         is_oriented=True,
+        gvgai_actions=('ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_USE', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
     ),
 }
 
@@ -283,6 +308,27 @@ AVATAR_CLASSES = frozenset(
 MOVING_NPC_CLASSES = frozenset(
     sc for sc, d in SPRITE_REGISTRY.items() if d.is_moving_npc
 )
+
+
+def gvgai_effective_speed(speed, block_size):
+    """Convert a VGDL speed to GVGAI's effective speed after integer truncation.
+
+    GVGAI GridPhysics: pixel_displacement = (int)(speed * block_size),
+    cell_displacement = pixel_displacement / block_size.
+    """
+    if speed == 0.0:
+        return 0.0
+    return int(speed * block_size) / block_size
+
+
+def effective_speed(sd, block_size):
+    """Resolve a SpriteDef's speed to GVGAI-effective speed.
+
+    GridPhysics types get integer-truncation; continuous/gravity types pass through.
+    """
+    if sd.physics_type in (PHYSICS_CONTINUOUS, PHYSICS_GRAVITY):
+        return sd.speed
+    return gvgai_effective_speed(sd.speed, block_size)
 
 
 @dataclass
@@ -353,6 +399,7 @@ class GameDef:
     char_mapping: Dict[str, List[str]]
     sprite_order: List[str]
     stype_to_indices: Dict[str, List[int]]
+    square_size: int = 0  # GVGAI square_size override (0 = auto from level dims)
 
     def type_idx(self, key: str) -> int:
         for s in self.sprites:

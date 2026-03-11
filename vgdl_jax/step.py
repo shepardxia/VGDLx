@@ -75,7 +75,8 @@ def _sweep_directions(ipos, iprev):
 
 def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                   chaser_target_set=frozenset(),
-                  static_distance_fields=None):
+                  static_distance_fields=None,
+                  action_map=None):
     """
     Build a jit-compiled step function from compiled game configuration.
 
@@ -131,6 +132,10 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
         _cache_safe_type_b = frozenset(range(n_types)) - _pos_modified_types
 
     def _step_inner(state: GameState, action: int) -> GameState:
+        # Remap GVGAI action index → internal action index
+        if action_map is not None:
+            action = action_map[action]
+
         # Save previous positions for stepBack / undoAll / bounceForward
         prev_positions = state.positions
 

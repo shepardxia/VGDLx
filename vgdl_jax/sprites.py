@@ -38,23 +38,39 @@ def prefix_sum_allocate(alive_mask, source_mask):
     return should_fill, src_indices
 
 
-def _move_with_cooldown(state, type_idx, cooldown, deltas=None):
+def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True):
     """Apply cooldown-gated movement. Uses orientations if deltas is None.
 
+    GVGAI has two movement paths:
+    - passiveMovement (missiles): isFirstTick blocks movement, then clears flag
+    - activeMovement (chasers, random NPCs): isFirstTick does NOT block, just clears
+
+    Args:
+        passive: If True, is_first_tick blocks movement (missile-style).
+                 If False, is_first_tick is only cleared, not blocking (chaser-style).
+
     Returns:
-        (new_pos, new_timers, can_move)
+        (new_pos, new_timers, can_move, first_tick_mask)
+        first_tick_mask: [max_n] bool — sprites whose is_first_tick should be cleared
     """
-    can_move = (state.cooldown_timers[type_idx] >= cooldown) & state.alive[type_idx]
+    alive = state.alive[type_idx]
+    first_tick = state.is_first_tick[type_idx] & alive
+    cooldown_ok = (state.cooldown_timers[type_idx] >= cooldown) & alive
+    can_move = (~first_tick & cooldown_ok) if passive else cooldown_ok
     if deltas is None:
         deltas = state.orientations[type_idx]
     speed = state.speeds[type_idx]
     new_pos = state.positions[type_idx] + deltas * speed[:, None] * can_move[:, None]
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
-    return new_pos, new_timers, can_move
+    return new_pos, new_timers, can_move, first_tick
 
 
-def _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=None, rng=None):
-    """Write back NPC movement results: positions + timers, optionally orientations + rng."""
+def _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=None, rng=None,
+                    first_tick_mask=None):
+    """Write back NPC movement results: positions + timers, optionally orientations + rng.
+
+    If first_tick_mask is provided, clears is_first_tick for those sprites.
+    """
     updates = dict(
         positions=state.positions.at[type_idx].set(new_pos),
         cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers),
@@ -63,6 +79,9 @@ def _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=None, rng=None
         updates['orientations'] = state.orientations.at[type_idx].set(new_ori)
     if rng is not None:
         updates['rng'] = rng
+    if first_tick_mask is not None:
+        updates['is_first_tick'] = state.is_first_tick.at[type_idx].set(
+            state.is_first_tick[type_idx] & ~first_tick_mask)
     return state.replace(**updates)
 
 
@@ -71,8 +90,9 @@ def _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=None, rng=None
 
 def update_missile(state: GameState, type_idx, cooldown):
     """Move along fixed orientation each tick (if cooldown met and alive)."""
-    new_pos, new_timers, _ = _move_with_cooldown(state, type_idx, cooldown)
-    return _apply_npc_move(state, type_idx, new_pos, new_timers)
+    new_pos, new_timers, _, first_tick = _move_with_cooldown(state, type_idx, cooldown)
+    return _apply_npc_move(state, type_idx, new_pos, new_timers,
+                           first_tick_mask=first_tick)
 
 
 def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
@@ -81,7 +101,7 @@ def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
     max_n = state.alive.shape[1]
 
     # Move along current orientation (same as missile)
-    new_pos, new_timers, _ = _move_with_cooldown(state, type_idx, cooldown)
+    new_pos, new_timers, _, first_tick = _move_with_cooldown(state, type_idx, cooldown)
 
     # Randomly change direction with probability `prob`
     should_change = (jax.random.uniform(key_move, (max_n,)) < prob) & state.alive[type_idx]
@@ -89,7 +109,8 @@ def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
     random_ori = DIRECTION_DELTAS[dir_indices]
     new_ori = jnp.where(should_change[:, None], random_ori, state.orientations[type_idx])
 
-    return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng)
+    return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng,
+                           first_tick_mask=first_tick)
 
 
 def update_random_npc(state: GameState, type_idx, cooldown, cons=0):
@@ -107,9 +128,11 @@ def update_random_npc(state: GameState, type_idx, cooldown, cons=0):
     else:
         deltas = random_deltas
         new_ticks = None
-    new_pos, new_timers, can_move = _move_with_cooldown(state, type_idx, cooldown, deltas=deltas)
+    new_pos, new_timers, can_move, first_tick = _move_with_cooldown(
+        state, type_idx, cooldown, deltas=deltas, passive=False)
     new_ori = jnp.where(can_move[:, None], deltas, state.orientations[type_idx])
-    state = _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng)
+    state = _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng,
+                            first_tick_mask=first_tick)
     if new_ticks is not None:
         state = state.replace(
             direction_ticks=state.direction_ticks.at[type_idx].set(new_ticks))
@@ -146,9 +169,16 @@ def _manhattan_distance_field(target_pos, target_alive, height, width):
 
 def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
                   fleeing=False, height=0, width=0, dist_field=None):
-    """Move toward (or away from) nearest target using grid distance field. O(H*W + N)."""
+    """Move toward (or away from) nearest target using grid distance field. O(H*W + N).
+
+    In GVGAI, isFirstTick is cleared in updatePassive() but doesn't block the
+    action (activeMovement still runs). We match this: first_tick sprites CAN
+    move, but we clear the flag afterwards.
+    """
     rng, key = jax.random.split(state.rng)
-    can_move = (state.cooldown_timers[type_idx] >= cooldown) & state.alive[type_idx]
+    alive = state.alive[type_idx]
+    first_tick = state.is_first_tick[type_idx] & alive
+    can_move = (state.cooldown_timers[type_idx] >= cooldown) & alive
 
     chaser_pos = state.positions[type_idx].astype(jnp.int32)  # [max_n, 2]
     target_alive = state.alive[target_type_idx]     # [max_n]
@@ -184,12 +214,18 @@ def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
     new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None]
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
     new_ori = jnp.where(can_move[:, None], delta, state.orientations[type_idx])
-    return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng)
+    return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng,
+                           first_tick_mask=first_tick)
 
 
 def spawn_sprite(state: GameState, spawner_type, spawner_idx, target_type,
                  orientation, speed):
-    """Create a new sprite of target_type at the spawner's position."""
+    """Create a new sprite of target_type at the spawner's position.
+
+    Tick-spawned (SpawnPoint, Bomber, avatar shoot): is_first_tick=False,
+    cooldown_timers=0. In GVGAI, these sprites get processed in the same tick
+    due to reverse spriteOrder, consuming isFirstTick and incrementing lastmove.
+    """
     pos = state.positions[spawner_type, spawner_idx]
     available = ~state.alive[target_type]
     slot = jnp.argmax(available)
@@ -207,13 +243,20 @@ def spawn_sprite(state: GameState, spawner_type, spawner_idx, target_type,
             jnp.where(has_slot, 0, state.ages[target_type, slot])),
         cooldown_timers=state.cooldown_timers.at[target_type, slot].set(
             jnp.where(has_slot, 0, state.cooldown_timers[target_type, slot])),
+        is_first_tick=state.is_first_tick.at[target_type, slot].set(
+            jnp.where(has_slot, False, state.is_first_tick[target_type, slot])),
     )
     return state
 
 
 def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
                        target_type, target_orientation, target_speed):
-    """Conditionally spawn sprites — fully vectorized via prefix-sum slot allocation."""
+    """Conditionally spawn sprites — fully vectorized via prefix-sum slot allocation.
+
+    Spawned sprites get is_first_tick=False and cooldown_timers=0: in GVGAI,
+    reverse spriteOrder means spawned types (lower index) are processed in the
+    same tick, consuming isFirstTick and incrementing lastmove.
+    """
     rng, key = jax.random.split(state.rng)
     max_n = state.alive.shape[1]
 
@@ -247,6 +290,8 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
             jnp.where(should_fill, 0, state.ages[target_type])),
         cooldown_timers=state.cooldown_timers.at[target_type].set(
             jnp.where(should_fill, 0, state.cooldown_timers[target_type])),
+        is_first_tick=state.is_first_tick.at[target_type].set(
+            jnp.where(should_fill, False, state.is_first_tick[target_type])),
         rng=rng,
     )
 

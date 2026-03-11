@@ -13,14 +13,6 @@ import tempfile
 
 from .discovery import GameEntry
 
-# VGDLx action mapping: UP=0, DOWN=1, LEFT=2, RIGHT=3, NOOP=n_move, SHOOT=n_move+1
-_VGDLX_TO_GVGAI = {
-    0: 'ACTION_UP',
-    1: 'ACTION_DOWN',
-    2: 'ACTION_LEFT',
-    3: 'ACTION_RIGHT',
-}
-
 _GVGAI_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'GVGAI'))
 _GVGAI_BIN = os.path.join(_GVGAI_DIR, 'bin')
 _GVGAI_LIB = os.path.join(_GVGAI_DIR, 'lib')
@@ -71,15 +63,6 @@ public class TraceRunner {{
         raise RuntimeError(f"TraceRunner compilation failed:\n{compile_result.stderr}")
 
 
-def _vgdlx_action_to_gvgai(action_idx, noop_action, shoot_action=None):
-    """Convert VGDLx action index to GVGAI action name."""
-    if action_idx == noop_action:
-        return 'ACTION_NIL'
-    if shoot_action is not None and action_idx == shoot_action:
-        return 'ACTION_USE'
-    return _VGDLX_TO_GVGAI.get(action_idx, 'ACTION_NIL')
-
-
 def _build_classpath():
     """Build Java classpath from GVGAI bin/ and lib/ directories."""
     lib_jars = []
@@ -90,17 +73,16 @@ def _build_classpath():
 
 
 def run_gvgai_trajectory(entry: GameEntry, actions: list, seed: int = 42,
-                          level_idx: int = 0, noop_action: int = 4,
-                          shoot_action: int = None) -> list:
+                          level_idx: int = 0,
+                          action_names: tuple = ()) -> list:
     """Run GVGAI via subprocess with TraceAgent, return list of state dicts.
 
     Args:
         entry: GameEntry with game_file and level_files
-        actions: list of VGDLx action indices
+        actions: list of action indices (GVGAI ordering — direct index into action_names)
         seed: random seed
         level_idx: which level to use
-        noop_action: VGDLx NOOP action index
-        shoot_action: VGDLx SHOOT action index (None if no shoot)
+        action_names: tuple of GVGAI action name strings in order
 
     Returns:
         list of dicts, each with:
@@ -118,7 +100,7 @@ def run_gvgai_trajectory(entry: GameEntry, actions: list, seed: int = 42,
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
         actions_file = f.name
         for a in actions:
-            gvgai_action = _vgdlx_action_to_gvgai(a, noop_action, shoot_action)
+            gvgai_action = action_names[a]
             f.write(gvgai_action + '\n')
 
     with tempfile.NamedTemporaryFile(suffix='.jsonl', delete=False) as f:

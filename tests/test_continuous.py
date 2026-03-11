@@ -81,8 +81,8 @@ class TestMarioGravity:
         avatar_type = cg.game_def.type_idx('avatar')
         initial_pos = state.positions[avatar_type, 0].copy()
 
-        # Step with NOOP (action=5) for 20 frames
-        NOOP = 5
+        # Step with NOOP — GVGAI ordering: LEFT=0, RIGHT=1, USE=2, NIL=3
+        NOOP = 3
         for _ in range(20):
             state = cg.step_fn(state, NOOP)
 
@@ -98,7 +98,7 @@ class TestMarioGravity:
         avatar_type = cg.game_def.type_idx('avatar')
 
         # Step a few frames for wallStop to fire and zero passive_forces
-        NOOP = 5
+        NOOP = 3
         for _ in range(5):
             state = cg.step_fn(state, NOOP)
 
@@ -107,9 +107,9 @@ class TestMarioGravity:
         assert pf[0] == 0.0, f"passive_forces[row] should be 0 when grounded, got {pf[0]}"
 
     def test_action_count(self):
-        """MarioAvatar should have 6 actions: LEFT, RIGHT, JUMP, J+L, J+R, NOOP."""
+        """MarioAvatar should have 4 actions: LEFT, RIGHT, USE(JUMP), NIL."""
         cg = _compile(MARIO_GAME, MARIO_LEVEL)
-        assert cg.n_actions == 6
+        assert cg.n_actions == 4
 
 
 class TestMarioJump:
@@ -122,9 +122,9 @@ class TestMarioJump:
         avatar_type = cg.game_def.type_idx('avatar')
         start_row = float(state.positions[avatar_type, 0, 0])
 
-        # Jump = action 2
+        # GVGAI ordering: LEFT=0, RIGHT=1, USE(JUMP)=2, NIL=3
         JUMP = 2
-        NOOP = 5
+        NOOP = 3
 
         # Apply jump
         state = cg.step_fn(state, JUMP)
@@ -151,8 +151,8 @@ class TestMarioJump:
         state = cg.init_state
         avatar_type = cg.game_def.type_idx('avatar')
 
-        # Let it settle
-        NOOP = 5
+        # Let it settle — GVGAI ordering: LEFT=0, RIGHT=1, USE=2, NIL=3
+        NOOP = 3
         for _ in range(3):
             state = cg.step_fn(state, NOOP)
 
@@ -180,8 +180,8 @@ class TestInertialVelocity:
         state = cg.init_state
         avatar_type = cg.game_def.type_idx('avatar')
 
-        # RIGHT = action 3 (UP=0, DOWN=1, LEFT=2, RIGHT=3)
-        RIGHT = 3
+        # GVGAI ordering: LEFT=0, RIGHT=1, DOWN=2, UP=3, NIL=4
+        RIGHT = 1
         for _ in range(5):
             state = cg.step_fn(state, RIGHT)
 
@@ -195,8 +195,9 @@ class TestInertialVelocity:
         state = cg.init_state
         avatar_type = cg.game_def.type_idx('avatar')
 
-        RIGHT = 3
-        NOOP = 4  # InertialAvatar: 4 move + NOOP = 5 actions
+        # GVGAI ordering: LEFT=0, RIGHT=1, DOWN=2, UP=3, NIL=4
+        RIGHT = 1
+        NOOP = 4
 
         # Apply right force for a few frames
         for _ in range(3):
@@ -218,8 +219,8 @@ class TestInertialVelocity:
         state = cg.init_state
         avatar_type = cg.game_def.type_idx('avatar')
 
-        # Drive hard right until hitting wall
-        RIGHT = 3
+        # Drive hard right until hitting wall — GVGAI ordering: RIGHT=1
+        RIGHT = 1
         for _ in range(50):
             state = cg.step_fn(state, RIGHT)
 

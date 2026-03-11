@@ -504,8 +504,17 @@ def parse_vgdl_text(game_text, level_text=None):
     Parse VGDL game text (and optional level text) into a GameDef.
     """
     tree = indent_tree_parser(game_text)
-    # The root's first child is the game node (e.g. "BasicGame")
+    # The root's first child is the game node (e.g. "BasicGame square_size=32")
     game_node = tree.children[0]
+
+    # Parse game-level params from header (e.g. "BasicGame square_size=32")
+    game_header_parts = game_node.content.strip().split()
+    game_params = {}
+    for part in game_header_parts[1:]:
+        if '=' in part:
+            k, v = part.split('=', 1)
+            game_params[k] = v
+    square_size = int(game_params.get('square_size', 0))
 
     raw_sprites = []
     raw_interactions = []
@@ -570,4 +579,5 @@ def parse_vgdl_text(game_text, level_text=None):
         char_mapping=raw_mappings,
         sprite_order=sprite_order,
         stype_to_indices=dict(stype_to_indices),
+        square_size=square_size,
     )

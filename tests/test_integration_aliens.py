@@ -14,8 +14,8 @@ def test_aliens_flak_shoots_missile():
     # Initially no sam missile
     assert state.alive[sam_idx].sum() == 0
 
-    # FlakAvatar: actions are LEFT=0, RIGHT=1, NOOP=2, SHOOT=3
-    shoot_action = 3
+    # FlakAvatar GVGAI ordering: USE=0, LEFT=1, RIGHT=2, NIL=3
+    shoot_action = 0
     obs, state, _, _, _ = env.step(state, shoot_action)
 
     # Sam missile should be spawned
@@ -32,12 +32,12 @@ def test_aliens_missile_moves_up():
     sam_idx = gd.type_idx('sam')
 
     # Shoot to create missile
-    shoot_action = 3  # FlakAvatar: LEFT=0, RIGHT=1, NOOP=2, SHOOT=3
+    shoot_action = 0  # FlakAvatar GVGAI ordering: USE=0, LEFT=1, RIGHT=2, NIL=3
     obs, state, _, _, _ = env.step(state, shoot_action)
     assert state.alive[sam_idx].sum() == 1
     sam_pos_0 = state.positions[sam_idx, 0].copy()
 
-    # NOOP to let missile move
+    # NOOP once — tick-spawned missile has is_first_tick=False, moves after 1 cooldown tick
     obs, state, _, _, _ = env.step(state, env.noop_action)
 
     # Missile should move up (row decreases) or be dead (hit EOS or something)
@@ -56,13 +56,13 @@ def test_aliens_flak_moves_horizontal():
     avatar_idx = gd.type_idx('avatar')
     initial_pos = state.positions[avatar_idx, 0].copy()
 
-    # Action 0 = LEFT for FlakAvatar
-    obs, state, _, _, _ = env.step(state, 0)
+    # Action 1 = LEFT for FlakAvatar (GVGAI: USE=0, LEFT=1, RIGHT=2, NIL=3)
+    obs, state, _, _, _ = env.step(state, 1)
     pos_after_left = state.positions[avatar_idx, 0]
     # Row should stay same, column should decrease (or stay if at wall)
     assert pos_after_left[0] == initial_pos[0], "LEFT should not change row"
 
-    # Action 1 = RIGHT for FlakAvatar
-    obs, state, _, _, _ = env.step(state, 1)
+    # Action 2 = RIGHT for FlakAvatar
+    obs, state, _, _, _ = env.step(state, 2)
     pos_after_right = state.positions[avatar_idx, 0]
     assert pos_after_right[0] == initial_pos[0], "RIGHT should not change row"

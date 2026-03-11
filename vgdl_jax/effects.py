@@ -20,7 +20,10 @@ import jax.numpy as jnp
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 from vgdl_jax.collision import in_bounds, AABB_EPS
-from vgdl_jax.data_model import DEFAULT_RESOURCE_LIMIT
+from vgdl_jax.data_model import (
+    DEFAULT_RESOURCE_LIMIT, MOVING_NPC_CLASSES,
+    effective_speed,
+)
 from vgdl_jax.sprites import DIRECTION_DELTAS, prefix_sum_allocate
 
 
@@ -44,6 +47,7 @@ class CompileContext:
     concrete_actor_idx: Optional[int] = None
     concrete_actee_idx: Optional[int] = None
     resolve_first: Callable = field(default=None)
+    block_size: int = 24
 
     def __post_init__(self):
         if self.resolve_first is None:
@@ -130,7 +134,12 @@ def _nearest_partner(pos_a, state, type_b, eff_b):
 def _fill_slots(state, target_type, source_mask, src_positions,
                 src_orientations=None, target_speed=None, reset_cooldown=False,
                 src_resources=None):
-    """Allocate dead slots in target_type and fill with source data."""
+    """Allocate dead slots in target_type and fill with source data.
+
+    Effect-spawned sprites get is_first_tick=True and cooldown_timers=0.
+    In GVGAI, effects happen after the tick loop, so spawned sprites don't
+    get same-tick processing — their isFirstTick is consumed on the next tick.
+    """
     should_fill, src_idx = prefix_sum_allocate(state.alive[target_type], source_mask)
     src_pos = src_positions[src_idx]
     state = state.replace(
@@ -139,6 +148,8 @@ def _fill_slots(state, target_type, source_mask, src_positions,
             jnp.where(should_fill[:, None], src_pos, state.positions[target_type])),
         ages=state.ages.at[target_type].set(
             jnp.where(should_fill, 0, state.ages[target_type])),
+        is_first_tick=state.is_first_tick.at[target_type].set(
+            state.is_first_tick[target_type] | should_fill),
     )
     if src_orientations is not None:
         src_ori = src_orientations[src_idx]
@@ -788,7 +799,8 @@ def _ckw_transform_to(ed, ctx):
         copy_ori = force_ori or (
             (src_oriented is not None and src_oriented.is_oriented) and
             (dst_oriented is not None and dst_oriented.is_oriented))
-        result = {'new_type_idx': idx, 'target_speed': dst_def.speed,
+        dst_speed = effective_speed(dst_def, ctx.block_size)
+        result = {'new_type_idx': idx, 'target_speed': dst_speed,
                   'copy_orientation': copy_ori}
         if not copy_ori:
             result['default_orientation'] = dst_def.orientation
@@ -797,7 +809,8 @@ def _ckw_transform_to(ed, ctx):
 
 def _ckw_clone_sprite(ed, ctx):
     if ctx.concrete_actor_idx is not None:
-        return {'target_speed': ctx.game_def.sprites[ctx.concrete_actor_idx].speed}
+        sd = ctx.game_def.sprites[ctx.concrete_actor_idx]
+        return {'target_speed': effective_speed(sd, ctx.block_size)}
     return {}
 
 def _ckw_change_resource(ed, ctx):
@@ -859,8 +872,9 @@ def _ckw_spawn_if_has_more(ed, ctx):
     }
     idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('stype', ''))
     if idx is not None:
+        sd = ctx.game_def.sprites[idx]
         kwargs['spawn_type_idx'] = idx
-        kwargs['target_speed'] = ctx.game_def.sprites[idx].speed
+        kwargs['target_speed'] = effective_speed(sd, ctx.block_size)
     return kwargs
 
 def _ckw_prob_half(ed, ctx):
@@ -905,8 +919,9 @@ def _ckw_transform_others_to(ed, ctx):
         kwargs['target_type_idx'] = idx
     idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('stype', ''))
     if idx is not None:
+        sd = ctx.game_def.sprites[idx]
         kwargs['new_type_idx'] = idx
-        kwargs['target_speed'] = ctx.game_def.sprites[idx].speed
+        kwargs['target_speed'] = effective_speed(sd, ctx.block_size)
     return kwargs
 
 def _ckw_wall_physics(ed, ctx):

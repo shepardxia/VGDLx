@@ -434,8 +434,7 @@ def run_gvgai_comparison(entry: GameEntry, actions, seed=42, level_idx=0):
     # ── Run GVGAI side ──
     gvgai_raw = run_gvgai_trajectory(
         entry, actions, seed=seed, level_idx=level_idx,
-        noop_action=compiled.noop_action,
-        shoot_action=compiled.noop_action + 1 if compiled.n_actions > compiled.noop_action + 1 else None,
+        action_names=compiled.action_names,
     )
     gvgai_states = [normalize_gvgai_state(s, game_def) for s in gvgai_raw]
 

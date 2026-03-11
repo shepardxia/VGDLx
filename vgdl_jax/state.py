@@ -16,6 +16,7 @@ class GameState:
     resources: jnp.ndarray       # [n_types, max_n, n_resource_types] int32
     velocities: jnp.ndarray      # [n_types, max_n, 2] float32
     passive_forces: jnp.ndarray  # [n_types, max_n, 2] float32
+    is_first_tick: jnp.ndarray  # [n_types, max_n] bool — blocks passiveMovement for 1 tick
     static_grids: jnp.ndarray   # [n_static_types, height, width] bool
     score: jnp.int32
     step_count: jnp.int32
@@ -43,6 +44,7 @@ def create_initial_state(n_types, max_n, height, width,
         resources=jnp.zeros((n_types, max_n, n_res), dtype=jnp.int32),
         velocities=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
         passive_forces=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
+        is_first_tick=jnp.zeros((n_types, max_n), dtype=jnp.bool_),
         static_grids=jnp.zeros((n_static, height, width), dtype=jnp.bool_),
         score=jnp.int32(0),
         step_count=jnp.int32(0),

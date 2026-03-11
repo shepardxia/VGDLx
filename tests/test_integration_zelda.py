@@ -14,8 +14,8 @@ def test_zelda_shoot_creates_sword():
     # Initially no sword alive
     assert state.alive[sword_idx].sum() == 0
 
-    # Shoot action: ShootAvatar has UP=0,DOWN=1,LEFT=2,RIGHT=3,NOOP=4,SHOOT=5
-    shoot_action = 5
+    # Shoot action: ShootAvatar GVGAI ordering: USE=0, LEFT=1, RIGHT=2, DOWN=3, UP=4, NIL=5
+    shoot_action = 0
     obs, state, _, _, _ = env.step(state, shoot_action)
 
     # Sword should be spawned

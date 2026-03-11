@@ -64,15 +64,15 @@ Not implemented in VGDLx:
 
 ## GVGAI Cross-Engine Validation (42 supported games, 10 steps)
 
-**14 exact match**: bait, brainman, chainreaction, chipschallenge, clusters, cookmepasta, flower, modality, realsokoban, shipwreck, sokoban, superman, thesnowman, wrapsokoban
+**15 exact match**: bait, brainman, chainreaction, chipschallenge, clusters, cookmepasta, flower, modality, realsokoban, shipwreck, sokoban, superman, thecitadel, thesnowman, wrapsokoban
 
-**17 speed/position + SpawnPoint**: aliens, angelsdemons, assemblyline, chopper, defender, factorymanager, ikaruga, infection, jaws, myAliens, plaqueattack, rivers, sheriff, surround, waitforbreakfast, waves, wildgunman — fractional speed arithmetic differs (GVGAI `speed × gridsize` pixels vs VGDLx `pos += ori * speed` cells). SpawnPoint timing was fixed but speed divergence causes cascading position/alive diffs.
+**~21 speed/position** (with or without SpawnPoint): aliens, angelsdemons, assemblyline, avoidgeorge, butterflies, chopper, defender, eggomania, factorymanager, ikaruga, infection, jaws, missilecommand, myAliens, plaqueattack, portals, rivers, sheriff, surround, waitforbreakfast, waves, wildgunman — GVGAI truncates `int(speed * blockSize)` to integer pixel displacement each tick, producing integer pixel positions. VGDLx uses `pos += ori * effective_speed` with float32 accumulation. Even with matching per-tick displacement magnitude, positions drift because GVGAI rounds to pixel grid each tick.
 
-**4 speed/position only**: avoidgeorge, butterflies, missilecommand, portals — no SpawnPoints, pure fractional position drift from integer-pixel vs float-cell physics.
+**2 movement blocking**: chase, whackamole — NOT chaser algorithm. Sprites compute correct new_pos but movement is reverted downstream (EOS detection or stepBack reverting valid moves).
 
-**2 NPC movement**: chase, whackamole — Chaser pathfinding difference (greedy vs distance field).
+**2 partial** (noop matches, movement fails): glow, islands — action mapping fixed (noop now matches), remaining failures from speed/position physics.
 
-**5 partial match** (noop matches, movement fails): eggomania, glow, islands, tercio, thecitadel
+**1 partial** (bounceForward): tercio — crate doesn't move after avatar collision in VGDLx.
 
 **1 compile error**: sistersavior — VGDLx can't find avatar in game definition.
 

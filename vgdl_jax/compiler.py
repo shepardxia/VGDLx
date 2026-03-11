@@ -19,6 +19,8 @@ from vgdl_jax.data_model import (
     DEFAULT_RESOURCE_LIMIT, GRAVITY_ACCEL,
     SPRITE_HEADROOM, N_DIRECTIONS,
     PHYSICS_CONTINUOUS, PHYSICS_GRAVITY,
+    effective_speed,
+    GVGAI_ACTION_TO_DIR,
 )
 from vgdl_jax.effects import compile_effect_kwargs, CompileContext, ALIVE_MODIFYING_EFFECTS, POSITION_MODIFYING_EFFECTS
 from vgdl_jax.state import GameState, create_initial_state
@@ -35,6 +37,7 @@ class CompiledGame:
     noop_action: int
     game_def: GameDef
     static_grid_map: dict  # type_idx → static_grid_idx (empty if no static types)
+    action_names: tuple = ()  # GVGAI action names in order, e.g. ('ACTION_LEFT', ...)
 
 
 def _resolve_first(game_def, stype, default=None):
@@ -43,6 +46,15 @@ def _resolve_first(game_def, stype, default=None):
         return default
     indices = game_def.resolve_stype(stype)
     return indices[0] if indices else default
+
+
+def _gvgai_block_size(height, width):
+    """Compute GVGAI's block_size from level dimensions.
+
+    GVGAI: max(2, (int)(800) / max(width, height)).
+    Note: GVGAI uses max(width, height), not max(height, width).
+    """
+    return max(2, 800 // max(width, height))
 
 
 def _find_avatar(game_def):
@@ -157,7 +169,7 @@ def _select_collision_mode(a_static, b_static, a_frac, b_frac, speed_a, speed_b)
         return 'grid'
 
 
-def _build_avatar_config(avatar_sd, game_def):
+def _build_avatar_config(avatar_sd, game_def, block_size):
     """Build AvatarConfig, n_actions, and n_move from the avatar SpriteDef."""
     sc_def = SPRITE_REGISTRY[avatar_sd.sprite_class]
     n_move = sc_def.n_move_actions
@@ -174,15 +186,13 @@ def _build_avatar_config(avatar_sd, game_def):
         proj_type_idx = _resolve_first(game_def, avatar_sd.spawner_stype, -1)
         if proj_type_idx >= 0:
             proj_sd = game_def.sprites[proj_type_idx]
-            proj_speed = proj_sd.speed
+            proj_speed = effective_speed(proj_sd, block_size)
             if avatar_sd.sprite_class == SpriteClass.SHOOT_AVATAR:
                 proj_ori_from_avatar = True
             else:
                 proj_default_ori = list(proj_sd.orientation)
                 proj_ori_from_avatar = False
         shoot_action_idx = n_move + 1
-
-    n_actions = n_move + (1 if can_shoot else 0) + 1
 
     avatar_config = AvatarConfig(
         avatar_type_idx=avatar_sd.type_idx,
@@ -209,10 +219,113 @@ def _build_avatar_config(avatar_sd, game_def):
         can_move_aimed=sc_def.can_move_aimed,
         angle_diff=avatar_sd.angle_diff,
     )
-    return avatar_config, n_actions, n_move
+    return avatar_config, n_move
 
 
-def _build_sprite_configs(game_def):
+def _build_action_map(sc_def, avatar_config):
+    """Build action_map: GVGAI action index → VGDLx internal action index.
+
+    Uses gvgai_actions from the SpriteClassDef to determine the GVGAI ordering,
+    then maps each to the corresponding internal action index.
+    """
+    n_move = avatar_config.n_move_actions
+    direction_offset = avatar_config.direction_offset
+    shoot_internal = avatar_config.shoot_action_idx  # n_move + 1 if can_shoot, else -1
+
+    # Special case: MarioAvatar has hardcoded internal action encoding
+    # Internal: LEFT=0, RIGHT=1, JUMP=2, JUMP_LEFT=3, JUMP_RIGHT=4, NOOP=5
+    # GVGAI: [LEFT, RIGHT, USE, NIL] → [0, 1, 2, 5]
+    if sc_def.physics_type == PHYSICS_GRAVITY:
+        action_map = []
+        for name in sc_def.gvgai_actions:
+            if name == 'ACTION_NIL':
+                action_map.append(5)  # internal NOOP
+            elif name == 'ACTION_USE':
+                action_map.append(2)  # internal JUMP
+            elif name == 'ACTION_LEFT':
+                action_map.append(0)
+            elif name == 'ACTION_RIGHT':
+                action_map.append(1)
+            else:
+                raise ValueError(f"Unexpected action {name} for MarioAvatar")
+        return jnp.array(action_map, dtype=jnp.int32)
+
+    # Special case: rotating avatars use ego-centric actions
+    # Internal: forward=0, back=1, CCW=2, CW=3, NOOP=4
+    # GVGAI ordering [LEFT, RIGHT, DOWN, UP, NIL]:
+    #   LEFT→CCW(2), RIGHT→CW(3), DOWN→back(1), UP→forward(0), NIL→NOOP(4)
+    if sc_def.is_rotating:
+        action_map = []
+        for name in sc_def.gvgai_actions:
+            if name == 'ACTION_NIL':
+                action_map.append(n_move)  # NOOP
+            elif name == 'ACTION_USE':
+                action_map.append(shoot_internal)
+            elif name == 'ACTION_LEFT':
+                action_map.append(2)  # CCW
+            elif name == 'ACTION_RIGHT':
+                action_map.append(3)  # CW
+            elif name == 'ACTION_DOWN':
+                action_map.append(1)  # back
+            elif name == 'ACTION_UP':
+                action_map.append(0)  # forward
+            else:
+                raise ValueError(f"Unexpected action {name} for RotatingAvatar")
+        return jnp.array(action_map, dtype=jnp.int32)
+
+    # Special case: aimed avatars
+    # AimedAvatar internal: aim_up=0, aim_down=1, NOOP=n_move(2), SHOOT=n_move+1(3)
+    # AimedFlakAvatar internal: left=0, right=1, aim_up=2, aim_down=3, NOOP=n_move(4), SHOOT=n_move+1(5)
+    if sc_def.is_aimed:
+        action_map = []
+        if sc_def.can_move_aimed:
+            # AimedFlakAvatar: LEFT=0, RIGHT=1, AIM_UP=2, AIM_DOWN=3 internally
+            for name in sc_def.gvgai_actions:
+                if name == 'ACTION_NIL':
+                    action_map.append(n_move)
+                elif name == 'ACTION_USE':
+                    action_map.append(shoot_internal)
+                elif name == 'ACTION_LEFT':
+                    action_map.append(0)
+                elif name == 'ACTION_RIGHT':
+                    action_map.append(1)
+                elif name == 'ACTION_UP':
+                    action_map.append(2)  # aim_up
+                elif name == 'ACTION_DOWN':
+                    action_map.append(3)  # aim_down
+                else:
+                    raise ValueError(f"Unexpected action {name} for AimedFlakAvatar")
+        else:
+            # AimedAvatar: AIM_UP=0, AIM_DOWN=1 internally
+            for name in sc_def.gvgai_actions:
+                if name == 'ACTION_NIL':
+                    action_map.append(n_move)
+                elif name == 'ACTION_USE':
+                    action_map.append(shoot_internal)
+                elif name == 'ACTION_UP':
+                    action_map.append(0)  # aim_up
+                elif name == 'ACTION_DOWN':
+                    action_map.append(1)  # aim_down
+                else:
+                    raise ValueError(f"Unexpected action {name} for AimedAvatar")
+        return jnp.array(action_map, dtype=jnp.int32)
+
+    # General case: standard avatars (MovingAvatar, OrientedAvatar,
+    # HorizontalAvatar, VerticalAvatar, ShootAvatar, FlakAvatar,
+    # ShootEverywhereAvatar, InertialAvatar)
+    action_map = []
+    for name in sc_def.gvgai_actions:
+        if name == 'ACTION_NIL':
+            action_map.append(n_move)  # NOOP
+        elif name == 'ACTION_USE':
+            action_map.append(shoot_internal)
+        else:
+            dir_idx = GVGAI_ACTION_TO_DIR[name]
+            action_map.append(dir_idx - direction_offset)
+    return jnp.array(action_map, dtype=jnp.int32)
+
+
+def _build_sprite_configs(game_def, block_size):
     """Build SpriteConfig list for all sprite types."""
     sprite_configs = []
     for sd in game_def.sprites:
@@ -249,7 +362,7 @@ def _build_sprite_configs(game_def):
             if target_idx >= 0:
                 target_sd = game_def.sprites[target_idx]
                 cfg.target_orientation = tuple(target_sd.orientation)
-                cfg.target_speed = target_sd.speed
+                cfg.target_speed = effective_speed(target_sd, block_size)
             else:
                 cfg.target_orientation = (0., 0.)
                 cfg.target_speed = 0.0
@@ -260,14 +373,15 @@ def _build_sprite_configs(game_def):
 
 def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                              type_max_n, resource_name_to_idx, resource_limits,
-                             avatar_type_idx):
+                             avatar_type_idx, block_size):
     """Build list of CompiledEffects from game definition."""
     continuous_types = {sd.type_idx for sd in game_def.sprites
                         if sd.physics_type in (PHYSICS_CONTINUOUS, PHYSICS_GRAVITY)}
-    fractional_speed_types = {sd.type_idx for sd in game_def.sprites
-                               if sd.speed != 1.0 and sd.speed > 0}
+    # Use effective speeds for collision mode detection
+    _speed_by_idx = {sd.type_idx: effective_speed(sd, block_size) for sd in game_def.sprites}
+    fractional_speed_types = {idx for idx, spd in _speed_by_idx.items()
+                               if spd != 1.0 and spd > 0}
     frac_or_cont = continuous_types | fractional_speed_types
-    _speed_by_idx = {sd.type_idx: sd.speed for sd in game_def.sprites}
 
     compiled_effects = []
     for ed in game_def.effects:
@@ -287,7 +401,8 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                         game_def, resource_name_to_idx, resource_limits,
                         avatar_type_idx, concrete_actor_idx=ta_idx,
                         concrete_actee_idx=None,
-                        resolve_first=_resolve_first)),
+                        resolve_first=_resolve_first,
+                        block_size=block_size)),
                 ))
         else:
             actee_indices = game_def.resolve_stype(ed.actee_stype)
@@ -317,7 +432,8 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                             game_def, resource_name_to_idx, resource_limits,
                             avatar_type_idx, concrete_actor_idx=ta_idx,
                             concrete_actee_idx=tb_idx,
-                            resolve_first=_resolve_first)),
+                            resolve_first=_resolve_first,
+                            block_size=block_size)),
                     ))
     return compiled_effects
 
@@ -402,6 +518,9 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
     static_type_indices, static_type_set, static_grid_map = _find_static_types(game_def)
     n_static = len(static_type_indices)
 
+    # GVGAI speed conversion: square_size overrides calculated block_size
+    block_size = game_def.square_size if game_def.square_size > 0 else _gvgai_block_size(height, width)
+
     # Compute per-type max_n from level sprite counts + headroom
     if max_sprites_per_type is None:
         active_types = _find_active_types(game_def, avatar_sd)
@@ -437,15 +556,28 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
         if slot >= max_n:
             continue
         sd = game_def.sprites[type_idx]
+        eff_speed = effective_speed(sd, block_size)
+        cd = max(sd.cooldown, 1)
+        sc_def = SPRITE_REGISTRY.get(sd.sprite_class)
+        # SpawnPoint/Bomber: cooldown_timers=cd-1 so they fire on tick 1
+        # (GVGAI: (start+gameTick)%cd==0 fires tick 0)
+        # All other sprites: cooldown_timers=0
+        if sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
+            init_timer = cd - 1
+        else:
+            init_timer = 0
+        # Moving NPCs get is_first_tick=True (GVGAI isFirstTick blocks passiveMovement)
+        init_first_tick = (sc_def is not None and sc_def.is_moving_npc)
         state = state.replace(
             positions=state.positions.at[type_idx, slot].set(
                 jnp.array([row, col], dtype=jnp.float32)),
             alive=state.alive.at[type_idx, slot].set(True),
             orientations=state.orientations.at[type_idx, slot].set(
                 jnp.array(sd.orientation, dtype=jnp.float32)),
-            speeds=state.speeds.at[type_idx, slot].set(jnp.float32(sd.speed)),
+            speeds=state.speeds.at[type_idx, slot].set(jnp.float32(eff_speed)),
             cooldown_timers=state.cooldown_timers.at[type_idx, slot].set(
-                jnp.int32(max(sd.cooldown, 1) - 1)),
+                jnp.int32(init_timer)),
+            is_first_tick=state.is_first_tick.at[type_idx, slot].set(init_first_tick),
         )
         slot_counts[type_idx] += 1
     state = state.replace(static_grids=jnp.array(static_grid_data))
@@ -462,11 +594,19 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
                     orientations=state.orientations.at[
                         sd.type_idx, :n_placed].set(DIRECTION_DELTAS[dir_indices]))
 
-    avatar_config, n_actions, n_move = _build_avatar_config(avatar_sd, game_def)
-    sprite_configs = _build_sprite_configs(game_def)
+    avatar_config, n_move = _build_avatar_config(avatar_sd, game_def, block_size)
+
+    # Build GVGAI action map
+    sc_def = SPRITE_REGISTRY[avatar_sd.sprite_class]
+    action_map = _build_action_map(sc_def, avatar_config)
+    action_names = sc_def.gvgai_actions
+    n_actions = len(action_names)
+    noop_action = list(action_names).index('ACTION_NIL')
+
+    sprite_configs = _build_sprite_configs(game_def, block_size)
     compiled_effects = _build_compiled_effects(
         game_def, static_type_set, static_grid_map, type_max_n,
-        resource_name_to_idx, resource_limits, avatar_sd.type_idx)
+        resource_name_to_idx, resource_limits, avatar_sd.type_idx, block_size)
     compiled_terminations = _build_compiled_terminations(
         game_def, static_type_set, static_grid_map,
         resource_name_to_idx, avatar_sd.type_idx)
@@ -506,11 +646,13 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
     step_fn = build_step_fn(compiled_effects, compiled_terminations,
                             sprite_configs, avatar_config, params,
                             chaser_target_set=frozenset(chaser_target_set),
-                            static_distance_fields=static_distance_fields)
+                            static_distance_fields=static_distance_fields,
+                            action_map=action_map)
 
     return CompiledGame(
         init_state=state, step_fn=step_fn, n_actions=n_actions,
-        noop_action=n_move, game_def=game_def, static_grid_map=static_grid_map)
+        noop_action=noop_action, game_def=game_def,
+        static_grid_map=static_grid_map, action_names=action_names)
 
 
 
