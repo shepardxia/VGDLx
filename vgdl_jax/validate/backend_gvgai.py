@@ -7,7 +7,6 @@ VGDLx type_idx via sprite names, and returns normalized state dicts.
 """
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 

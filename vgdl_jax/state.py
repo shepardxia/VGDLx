@@ -5,10 +5,10 @@ import flax.struct
 
 @flax.struct.dataclass
 class GameState:
-    positions: jnp.ndarray       # [n_types, max_n, 2] float32
+    positions: jnp.ndarray       # [n_types, max_n, 2] int32 (pixel coordinates)
     alive: jnp.ndarray           # [n_types, max_n] bool
     orientations: jnp.ndarray    # [n_types, max_n, 2] float32
-    speeds: jnp.ndarray          # [n_types, max_n] float32
+    speeds: jnp.ndarray          # [n_types, max_n] int32 (pixel displacement per tick)
     cooldown_timers: jnp.ndarray # [n_types, max_n] int32
     ages: jnp.ndarray            # [n_types, max_n] int32
     spawn_counts: jnp.ndarray    # [n_types, max_n] int32
@@ -33,10 +33,10 @@ def create_initial_state(n_types, max_n, height, width,
     n_res = max(n_resource_types, 1)  # at least 1 to keep shape valid
     n_static = max(n_static_types, 1)  # at least 1 to keep shape valid
     return GameState(
-        positions=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
+        positions=jnp.zeros((n_types, max_n, 2), dtype=jnp.int32),
         alive=jnp.zeros((n_types, max_n), dtype=jnp.bool_),
         orientations=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
-        speeds=jnp.ones((n_types, max_n), dtype=jnp.float32),  # speed=1.0 is the py-vgdl default
+        speeds=jnp.zeros((n_types, max_n), dtype=jnp.int32),  # pixel displacement per tick (set per-sprite by compiler)
         cooldown_timers=jnp.zeros((n_types, max_n), dtype=jnp.int32),
         ages=jnp.zeros((n_types, max_n), dtype=jnp.int32),
         spawn_counts=jnp.zeros((n_types, max_n), dtype=jnp.int32),

@@ -71,13 +71,14 @@ def extract_pyvgdl_state(game, sprite_key_order, block_size=10):
     }
 
 
-def extract_jax_state(state, game_def, static_grid_map=None):
+def extract_jax_state(state, game_def, static_grid_map=None, block_size=1):
     """Extract state from a vgdl-jax GameState into the same normalized dict.
 
     Args:
         state: GameState (flax.struct.dataclass)
         game_def: GameDef from parser
         static_grid_map: dict mapping type_idx → static_grid_idx, or None
+        block_size: pixels per cell (for pixel→cell conversion)
 
     Returns:
         Same dict format as extract_pyvgdl_state.
@@ -107,8 +108,9 @@ def extract_jax_state(state, game_def, static_grid_map=None):
             orientations = []
             for slot in range(alive_mask.shape[0]):
                 if alive_mask[slot]:
-                    row = float(state.positions[type_idx, slot, 0])
-                    col = float(state.positions[type_idx, slot, 1])
+                    # Pixel→cell conversion
+                    row = float(state.positions[type_idx, slot, 0]) / block_size
+                    col = float(state.positions[type_idx, slot, 1]) / block_size
                     positions.append((row, col))
                     ori_row = float(state.orientations[type_idx, slot, 0])
                     ori_col = float(state.orientations[type_idx, slot, 1])

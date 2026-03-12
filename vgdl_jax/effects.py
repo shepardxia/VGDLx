@@ -19,10 +19,10 @@ import jax
 import jax.numpy as jnp
 from dataclasses import dataclass, field
 from typing import Optional, Callable
-from vgdl_jax.collision import in_bounds, AABB_EPS
+from vgdl_jax.collision import in_bounds
 from vgdl_jax.data_model import (
     DEFAULT_RESOURCE_LIMIT, MOVING_NPC_CLASSES,
-    effective_speed,
+    speed_to_pixels,
 )
 from vgdl_jax.sprites import DIRECTION_DELTAS, prefix_sum_allocate
 
@@ -47,7 +47,7 @@ class CompileContext:
     concrete_actor_idx: Optional[int] = None
     concrete_actee_idx: Optional[int] = None
     resolve_first: Callable = field(default=None)
-    block_size: int = 24
+    block_size: int = 1
 
     def __post_init__(self):
         if self.resolve_first is None:
@@ -295,14 +295,18 @@ def reverse_direction(state, type_a, mask, score_delta, **_):
     return _with_score(prim_negate_orientation(state, type_a, mask), score_delta)
 
 
-def turn_around(state, prev_positions, type_a, mask, score_delta, height, width, **_):
+def turn_around(state, prev_positions, type_a, mask, score_delta,
+                height, width, block_size=1, **_):
     # py-vgdl: restore position, move DOWN twice, reverse direction
     state = prim_restore_pos(state, type_a, mask, prev_positions)
     pos = state.positions[type_a]
-    displaced = pos + mask[:, None] * jnp.array([2.0, 0.0])
+    # Displace by 2 cells = 2 * block_size pixels downward
+    displaced = pos + mask[:, None].astype(jnp.int32) * jnp.array([2 * block_size, 0], dtype=jnp.int32)
+    h_px = height * block_size - 1
+    w_px = width * block_size - 1
     displaced = jnp.stack([
-        jnp.clip(displaced[:, 0], 0, height - 1),
-        jnp.clip(displaced[:, 1], 0, width - 1),
+        jnp.clip(displaced[:, 0], 0, h_px),
+        jnp.clip(displaced[:, 1], 0, w_px),
     ], axis=-1)
     state = state.replace(positions=state.positions.at[type_a].set(
         jnp.where(mask[:, None], displaced, pos)))
@@ -324,17 +328,19 @@ def undo_all(state, prev_positions, mask, score_delta, **_):
     return _with_score(state.replace(positions=new_positions), score_delta)
 
 
-def wrap_around(state, type_a, mask, score_delta, height, width, kwargs=None, **_):
+def wrap_around(state, type_a, mask, score_delta, height, width,
+                kwargs=None, block_size=1, **_):
     offset = (kwargs or {}).get('offset', 0)
     ori = state.orientations[type_a]
     pos = state.positions[type_a]
     row_axis = ori[:, 0] != 0
+    # Boundaries in pixel space: (height-1-offset)*block_size and offset*block_size
     new_row = jnp.where(
-        mask & row_axis & (ori[:, 0] < 0), height - 1 - offset,
-        jnp.where(mask & row_axis & (ori[:, 0] > 0), 0 + offset, pos[:, 0]))
+        mask & row_axis & (ori[:, 0] < 0), (height - 1 - offset) * block_size,
+        jnp.where(mask & row_axis & (ori[:, 0] > 0), offset * block_size, pos[:, 0]))
     new_col = jnp.where(
-        mask & ~row_axis & (ori[:, 1] < 0), width - 1 - offset,
-        jnp.where(mask & ~row_axis & (ori[:, 1] > 0), 0 + offset, pos[:, 1]))
+        mask & ~row_axis & (ori[:, 1] < 0), (width - 1 - offset) * block_size,
+        jnp.where(mask & ~row_axis & (ori[:, 1] > 0), offset * block_size, pos[:, 1]))
     return _with_score(state.replace(
         positions=state.positions.at[type_a].set(
             jnp.stack([new_row, new_col], axis=-1))), score_delta)
@@ -516,17 +522,19 @@ def teleport_to_exit(state, type_a, mask, score_delta, kwargs, **_):
 
 
 def convey_sprite(state, type_a, type_b, mask, score_delta,
-                  kwargs, partner_idx=None, **_):
+                  kwargs, partner_idx=None, block_size=1, **_):
     strength = kwargs.get('strength', 1.0)
     if type_b >= 0:
         partner_ori = _partner_vals(state.orientations[type_b], partner_idx)
         valid = (partner_idx >= 0) & mask
-        state = prim_move(state, type_a, valid, partner_ori * strength)
+        # Movement in pixel space: orientation * strength (cast to int32)
+        delta = (partner_ori * strength).astype(jnp.int32)
+        state = prim_move(state, type_a, valid, delta)
     return _with_score(state, score_delta)
 
 
 def wind_gust(state, type_a, type_b, mask, score_delta, max_n,
-              partner_idx=None, kwargs=None, **_):
+              partner_idx=None, kwargs=None, block_size=1, **_):
     if kwargs is None:
         kwargs = {}
     if type_b >= 0:
@@ -535,17 +543,21 @@ def wind_gust(state, type_a, type_b, mask, score_delta, max_n,
         offsets = jax.random.randint(key, (max_n,), -1, 2)
         per_sprite = strength + offsets.astype(jnp.float32)
         partner_ori = _partner_vals(state.orientations[type_b], partner_idx)
-        state = prim_move(state, type_a, mask, partner_ori * per_sprite[:, None])
+        delta = (partner_ori * per_sprite[:, None]).astype(jnp.int32)
+        state = prim_move(state, type_a, mask, delta)
         return _with_score(state.replace(rng=rng), score_delta)
     return _with_score(state, score_delta)
 
 
-def slip_forward(state, type_a, mask, score_delta, kwargs, max_n, **_):
+def slip_forward(state, type_a, mask, score_delta, kwargs, max_n,
+                 block_size=1, **_):
     prob = kwargs.get('prob', 0.5)
     rng, key = jax.random.split(state.rng)
     rolls = jax.random.uniform(key, (max_n,))
     should_slip = mask & (rolls < prob)
-    state = prim_move(state, type_a, should_slip, state.orientations[type_a])
+    # Move one cell = block_size pixels in orientation direction
+    delta = (state.orientations[type_a] * block_size).astype(jnp.int32)
+    state = prim_move(state, type_a, should_slip, delta)
     return _with_score(state.replace(rng=rng), score_delta)
 
 
@@ -569,16 +581,16 @@ def partner_delta(state, prev_positions, type_a, type_b, mask,
 
 def wall_stop(state, prev_positions, type_a, type_b, mask,
               score_delta, kwargs, height, width,
-              max_a=None, max_b=None, **_):
+              max_a=None, max_b=None, block_size=1, **_):
     global_max_n = state.alive.shape[1]
     eff_a = max_a if max_a is not None else global_max_n
     eff_b = max_b if max_b is not None else global_max_n
 
     friction = kwargs.get('friction', 0.0)
     static_b_grid_idx = kwargs.get('static_b_grid_idx')
-    pos = state.positions[type_a, :eff_a]
-    prev = prev_positions[type_a, :eff_a]
-    vel = state.velocities[type_a, :eff_a]
+    pos = state.positions[type_a, :eff_a]    # int32 pixels
+    prev = prev_positions[type_a, :eff_a]    # int32 pixels
+    vel = state.velocities[type_a, :eff_a]   # float32
     pf = state.passive_forces[type_a, :eff_a]
     m = mask[:eff_a]
 
@@ -587,32 +599,31 @@ def wall_stop(state, prev_positions, type_a, type_b, mask,
         delta_d = pos - prev
         going_down = jnp.where(delta_d[:, 0] != 0, delta_d[:, 0] > 0, vel[:, 0] >= 0)
         going_right = jnp.where(delta_d[:, 1] != 0, delta_d[:, 1] > 0, vel[:, 1] >= 0)
+        # Wall cell in movement direction: pixel→cell
         r_wall = jnp.where(going_down,
-                           jnp.ceil(pos[:, 0]).astype(jnp.int32),
-                           jnp.floor(pos[:, 0]).astype(jnp.int32))
+                           (pos[:, 0] + block_size - 1) // block_size,
+                           pos[:, 0] // block_size)
         c_wall = jnp.where(going_right,
-                           jnp.ceil(pos[:, 1]).astype(jnp.int32),
-                           jnp.floor(pos[:, 1]).astype(jnp.int32))
-        c_at_prev = jnp.round(prev[:, 1]).astype(jnp.int32)
-        r_at_prev = jnp.round(prev[:, 0]).astype(jnp.int32)
+                           (pos[:, 1] + block_size - 1) // block_size,
+                           pos[:, 1] // block_size)
+        c_at_prev = prev[:, 1] // block_size
+        r_at_prev = prev[:, 0] // block_size
         r_wall_c = jnp.clip(r_wall, 0, height - 1)
         c_wall_c = jnp.clip(c_wall, 0, width - 1)
         c_prev_c = jnp.clip(c_at_prev, 0, width - 1)
         r_prev_c = jnp.clip(r_at_prev, 0, height - 1)
         has_row_cross = grid_b[r_wall_c, c_prev_c]
         has_col_cross = grid_b[r_prev_c, c_wall_c]
-        wall_row_v = r_wall.astype(jnp.float32)
-        wall_col_h = c_wall.astype(jnp.float32)
     elif type_b >= 0:
-        pos_b = state.positions[type_b, :eff_b]
+        pos_b = state.positions[type_b, :eff_b]  # int32 pixels
         alive_b = state.alive[type_b, :eff_b]
-        threshold = 1.0 - AABB_EPS
+        # Pixel AABB: overlap when |diff| < block_size on both axes
         v_rdiff = jnp.abs(pos[:, None, 0] - pos_b[None, :, 0])
         v_cdiff = jnp.abs(prev[:, None, 1] - pos_b[None, :, 1])
-        check_v = (v_rdiff < threshold) & (v_cdiff < threshold) & alive_b[None, :]
+        check_v = (v_rdiff < block_size) & (v_cdiff < block_size) & alive_b[None, :]
         h_rdiff = jnp.abs(prev[:, None, 0] - pos_b[None, :, 0])
         h_cdiff = jnp.abs(pos[:, None, 1] - pos_b[None, :, 1])
-        check_h = (h_rdiff < threshold) & (h_cdiff < threshold) & alive_b[None, :]
+        check_h = (h_rdiff < block_size) & (h_cdiff < block_size) & alive_b[None, :]
         has_row_cross = jnp.any(check_v, axis=1)
         has_col_cross = jnp.any(check_h, axis=1)
     else:
@@ -627,13 +638,18 @@ def wall_stop(state, prev_positions, type_a, type_b, mask,
 
     vert_mask = m & has_row_cross
     if static_b_grid_idx is not None:
-        flush_row = jnp.where(going_down, wall_row_v - 1.0, wall_row_v + 1.0)
+        # Flush to cell boundary in pixel space
+        # Going down: flush to pixel just before wall cell → (r_wall - 1) * block_size
+        # Going up: flush to pixel just after wall cell → (r_wall + 1) * block_size
+        flush_row = jnp.where(going_down,
+                              (r_wall - 1) * block_size,
+                              (r_wall + 1) * block_size)
         new_pos_row = jnp.where(vert_mask, flush_row, pos[:, 0])
     elif type_b >= 0:
-        v_dist = jnp.where(check_v, v_rdiff, 1e10)
+        v_dist = jnp.where(check_v, v_rdiff, jnp.int32(1000000))
         nearest_v = jnp.argmin(v_dist, axis=1)
         wall_row = pos_b[nearest_v, 0]
-        flush_row = jnp.where(vel[:, 0] > 0, wall_row - 1.0, wall_row + 1.0)
+        flush_row = jnp.where(vel[:, 0] > 0, wall_row - block_size, wall_row + block_size)
         new_pos_row = jnp.where(vert_mask, flush_row, pos[:, 0])
     else:
         new_pos_row = jnp.where(vert_mask, prev[:, 0], pos[:, 0])
@@ -644,13 +660,15 @@ def wall_stop(state, prev_positions, type_a, type_b, mask,
 
     horiz_mask = m & has_col_cross
     if static_b_grid_idx is not None:
-        flush_col = jnp.where(going_right, wall_col_h - 1.0, wall_col_h + 1.0)
+        flush_col = jnp.where(going_right,
+                              (c_wall - 1) * block_size,
+                              (c_wall + 1) * block_size)
         new_pos_col = jnp.where(horiz_mask, flush_col, pos[:, 1])
     elif type_b >= 0:
-        h_dist = jnp.where(check_h, h_cdiff, 1e10)
+        h_dist = jnp.where(check_h, h_cdiff, jnp.int32(1000000))
         nearest_h = jnp.argmin(h_dist, axis=1)
         wall_col = pos_b[nearest_h, 1]
-        flush_col = jnp.where(vel[:, 1] > 0, wall_col - 1.0, wall_col + 1.0)
+        flush_col = jnp.where(vel[:, 1] > 0, wall_col - block_size, wall_col + block_size)
         new_pos_col = jnp.where(horiz_mask, flush_col, pos[:, 1])
     else:
         new_pos_col = jnp.where(horiz_mask, prev[:, 1], pos[:, 1])
@@ -671,24 +689,28 @@ def wall_stop(state, prev_positions, type_a, type_b, mask,
 
 
 def wall_bounce(state, prev_positions, type_a, type_b, mask,
-                score_delta, kwargs, max_a=None, max_b=None, height=0, width=0, **_):
+                score_delta, kwargs, max_a=None, max_b=None,
+                height=0, width=0, block_size=1, **_):
     global_max_n = state.alive.shape[1]
     eff_a = max_a if max_a is not None else global_max_n
     eff_b = max_b if max_b is not None else global_max_n
 
     friction = kwargs.get('friction', 0.0)
     static_b_grid_idx = kwargs.get('static_b_grid_idx')
-    pos = state.positions[type_a, :eff_a]
-    prev = prev_positions[type_a, :eff_a]
-    vel = state.velocities[type_a, :eff_a]
+    pos = state.positions[type_a, :eff_a]    # int32 pixels
+    prev = prev_positions[type_a, :eff_a]    # int32 pixels
+    vel = state.velocities[type_a, :eff_a]   # float32
     m = mask[:eff_a]
 
     if static_b_grid_idx is not None:
         grid_b = state.static_grids[static_b_grid_idx]
-        r_curr = jnp.clip(jnp.round(pos[:, 0]).astype(jnp.int32), 0, height - 1)
-        c_curr = jnp.clip(jnp.round(pos[:, 1]).astype(jnp.int32), 0, width - 1)
-        row_diff = jnp.abs(pos[:, 0] - r_curr.astype(jnp.float32))
-        col_diff = jnp.abs(pos[:, 1] - c_curr.astype(jnp.float32))
+        # Pixel→cell: find nearest cell center offset
+        r_cell = pos[:, 0] // block_size
+        c_cell = pos[:, 1] // block_size
+        r_center = r_cell * block_size + block_size // 2
+        c_center = c_cell * block_size + block_size // 2
+        row_diff = jnp.abs(pos[:, 0] - r_center)
+        col_diff = jnp.abs(pos[:, 1] - c_center)
         is_vertical = row_diff >= col_diff
     elif type_b >= 0:
         nb_pos = _nearest_partner(pos, state, type_b, eff_b)
@@ -727,7 +749,8 @@ def wall_bounce(state, prev_positions, type_a, type_b, mask,
 
 
 def bounce_direction(state, prev_positions, type_a, type_b, mask,
-                     score_delta, kwargs, max_a=None, max_b=None, height=0, width=0, **_):
+                     score_delta, kwargs, max_a=None, max_b=None,
+                     height=0, width=0, block_size=1, **_):
     static_b_grid_idx = kwargs.get('static_b_grid_idx') if kwargs else None
 
     if static_b_grid_idx is not None or type_b >= 0:
@@ -735,16 +758,17 @@ def bounce_direction(state, prev_positions, type_a, type_b, mask,
         eff_a = max_a if max_a is not None else global_max_n
         eff_b = max_b if max_b is not None else global_max_n
 
-        pos_a = state.positions[type_a, :eff_a]
-        vel = state.velocities[type_a, :eff_a]
+        pos_a = state.positions[type_a, :eff_a]  # int32 pixels
+        vel = state.velocities[type_a, :eff_a]   # float32
         prev = prev_positions[type_a, :eff_a]
         m = mask[:eff_a]
 
         if static_b_grid_idx is not None:
-            r_curr = jnp.clip(jnp.round(pos_a[:, 0]).astype(jnp.int32), 0, height - 1)
-            c_curr = jnp.clip(jnp.round(pos_a[:, 1]).astype(jnp.int32), 0, width - 1)
-            nb_pos = jnp.stack([r_curr.astype(jnp.float32),
-                                c_curr.astype(jnp.float32)], axis=-1)
+            # Pixel→cell center: use as the "wall position" for reflection normal
+            r_cell = jnp.clip(pos_a[:, 0] // block_size, 0, height - 1)
+            c_cell = jnp.clip(pos_a[:, 1] // block_size, 0, width - 1)
+            nb_pos = jnp.stack([r_cell * block_size + block_size // 2,
+                                c_cell * block_size + block_size // 2], axis=-1).astype(jnp.float32)
         else:
             nb_pos = _nearest_partner(pos_a, state, type_b, eff_b)
 
@@ -799,7 +823,7 @@ def _ckw_transform_to(ed, ctx):
         copy_ori = force_ori or (
             (src_oriented is not None and src_oriented.is_oriented) and
             (dst_oriented is not None and dst_oriented.is_oriented))
-        dst_speed = effective_speed(dst_def, ctx.block_size)
+        dst_speed = speed_to_pixels(dst_def.speed, ctx.block_size, dst_def.physics_type)
         result = {'new_type_idx': idx, 'target_speed': dst_speed,
                   'copy_orientation': copy_ori}
         if not copy_ori:
@@ -810,7 +834,7 @@ def _ckw_transform_to(ed, ctx):
 def _ckw_clone_sprite(ed, ctx):
     if ctx.concrete_actor_idx is not None:
         sd = ctx.game_def.sprites[ctx.concrete_actor_idx]
-        return {'target_speed': effective_speed(sd, ctx.block_size)}
+        return {'target_speed': speed_to_pixels(sd.speed, ctx.block_size, sd.physics_type)}
     return {}
 
 def _ckw_change_resource(ed, ctx):
@@ -874,7 +898,7 @@ def _ckw_spawn_if_has_more(ed, ctx):
     if idx is not None:
         sd = ctx.game_def.sprites[idx]
         kwargs['spawn_type_idx'] = idx
-        kwargs['target_speed'] = effective_speed(sd, ctx.block_size)
+        kwargs['target_speed'] = speed_to_pixels(sd.speed, ctx.block_size, sd.physics_type)
     return kwargs
 
 def _ckw_prob_half(ed, ctx):
@@ -921,7 +945,7 @@ def _ckw_transform_others_to(ed, ctx):
     if idx is not None:
         sd = ctx.game_def.sprites[idx]
         kwargs['new_type_idx'] = idx
-        kwargs['target_speed'] = effective_speed(sd, ctx.block_size)
+        kwargs['target_speed'] = speed_to_pixels(sd.speed, ctx.block_size, sd.physics_type)
     return kwargs
 
 def _ckw_wall_physics(ed, ctx):
@@ -946,14 +970,14 @@ def _ckw_teleport_to_exit(ed, ctx):
 
 def _static_kill_if_other_resource(state, sg_idx, type_b, grid_mask,
                                     score_change, kwargs, height, width,
-                                    compare_fn):
+                                    compare_fn, block_size=1):
     r_idx = kwargs.get('resource_idx', 0)
     limit = kwargs.get('limit', 0)
     if type_b >= 0:
-        ipos_b = state.positions[type_b].astype(jnp.int32)
-        r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
-        c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
-        ib_b = in_bounds(ipos_b, height, width)
+        cell_b = state.positions[type_b] // block_size
+        r_b = jnp.clip(cell_b[:, 0], 0, height - 1)
+        c_b = jnp.clip(cell_b[:, 1], 0, width - 1)
+        ib_b = in_bounds(cell_b, height, width)
         b_matches = compare_fn(state.resources[type_b, :, r_idx], limit) & state.alive[type_b] & ib_b
         res_grid = jnp.zeros((height, width), dtype=jnp.bool_).at[r_b, c_b].max(b_matches)
         kill_mask = grid_mask & res_grid
@@ -963,41 +987,44 @@ def _static_kill_if_other_resource(state, sg_idx, type_b, grid_mask,
     return _with_score(state, kill_mask.sum() * jnp.int32(score_change))
 
 
-def _static_kill_sprite(state, sg_idx, type_b, grid_mask, score_change, kwargs, height, width):
+def _static_kill_sprite(state, sg_idx, type_b, grid_mask, score_change, kwargs, height, width, **_):
     n_killed = grid_mask.sum()
     state = prim_clear_static(state, sg_idx, grid_mask)
     return _with_score(state, n_killed * jnp.int32(score_change))
 
 
-def _static_kill_both(state, sg_idx, type_b, grid_mask, score_change, kwargs, height, width):
+def _static_kill_both(state, sg_idx, type_b, grid_mask, score_change, kwargs,
+                      height, width, block_size=1):
     n_killed = grid_mask.sum()
     state = prim_clear_static(state, sg_idx, grid_mask)
     if type_b >= 0:
-        ipos_b = state.positions[type_b].astype(jnp.int32)
-        r_b = jnp.clip(ipos_b[:, 0], 0, height - 1)
-        c_b = jnp.clip(ipos_b[:, 1], 0, width - 1)
-        ib_b = in_bounds(ipos_b, height, width)
+        cell_b = state.positions[type_b] // block_size
+        r_b = jnp.clip(cell_b[:, 0], 0, height - 1)
+        c_b = jnp.clip(cell_b[:, 1], 0, width - 1)
+        ib_b = in_bounds(cell_b, height, width)
         mask_b = grid_mask[r_b, c_b] & state.alive[type_b] & ib_b
         state = prim_kill(state, type_b, mask_b)
     return _with_score(state, n_killed * jnp.int32(score_change))
 
 
 def _static_kill_if_other_has_more(state, sg_idx, type_b, grid_mask,
-                                    score_change, kwargs, height, width):
+                                    score_change, kwargs, height, width,
+                                    block_size=1):
     return _static_kill_if_other_resource(
         state, sg_idx, type_b, grid_mask, score_change, kwargs,
-        height, width, jnp.greater_equal)
+        height, width, jnp.greater_equal, block_size=block_size)
 
 
 def _static_kill_if_other_has_less(state, sg_idx, type_b, grid_mask,
-                                    score_change, kwargs, height, width):
+                                    score_change, kwargs, height, width,
+                                    block_size=1):
     return _static_kill_if_other_resource(
         state, sg_idx, type_b, grid_mask, score_change, kwargs,
-        height, width, jnp.less_equal)
+        height, width, jnp.less_equal, block_size=block_size)
 
 
 def _static_kill_if_avatar_without_resource(state, sg_idx, type_b, grid_mask,
-                                             score_change, kwargs, height, width):
+                                             score_change, kwargs, height, width, **_):
     ati = kwargs.get('avatar_type_idx', 0)
     r_idx = kwargs.get('resource_idx', 0)
     kill_mask = grid_mask & ~(state.resources[ati, 0, r_idx] > 0)
@@ -1006,7 +1033,7 @@ def _static_kill_if_avatar_without_resource(state, sg_idx, type_b, grid_mask,
 
 
 def _static_collect_resource(state, sg_idx, type_b, grid_mask,
-                              score_change, kwargs, height, width):
+                              score_change, kwargs, height, width, **_):
     n_killed = grid_mask.sum()
     state = prim_clear_static(state, sg_idx, grid_mask)
     r_idx = kwargs.get('resource_idx', 0)
@@ -1130,12 +1157,14 @@ def compile_effect_kwargs(ed, ctx):
 
 
 def apply_static_a_effect(state, static_a_grid_idx, type_b, grid_mask,
-                          effect_type, score_change, kwargs, height, width):
+                          effect_type, score_change, kwargs, height, width,
+                          block_size=1):
     """Apply an effect where type_a is stored as a static grid."""
     handler = _STATIC_A_HANDLERS.get(effect_type)
     if handler is not None:
         return handler(state, static_a_grid_idx, type_b, grid_mask,
-                       score_change, kwargs, height, width)
+                       score_change, kwargs, height, width,
+                       block_size=block_size)
     return state  # Unsupported effect — no-op
 
 
@@ -1143,7 +1172,7 @@ def apply_masked_effect(state, prev_positions, type_a, type_b, mask,
                         effect_type, score_change, kwargs,
                         height, width, max_n,
                         max_a=None, max_b=None,
-                        partner_idx=None):
+                        partner_idx=None, block_size=1):
     """Apply a single effect to all type_a sprites indicated by mask [max_n].
 
     Both score_delta and score_change are passed to handlers:
@@ -1166,4 +1195,5 @@ def apply_masked_effect(state, prev_positions, type_a, type_b, mask,
         height=height, width=width, max_n=max_n,
         max_a=max_a, max_b=max_b,
         partner_idx=partner_idx,
+        block_size=block_size,
     )

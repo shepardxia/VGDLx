@@ -46,6 +46,9 @@ class VGDLJaxEnv:
         self._height = game_def.level.height
         self._width = game_def.level.width
         self._n_types = n_types
+        # block_size for pixel→cell conversion in _get_obs
+        from vgdl_jax.data_model import get_block_size
+        self._block_size = get_block_size(game_def)
         self.obs_shape = (n_types, self._height, self._width)
 
         # Static grid map: type_idx → static_grid_idx
@@ -96,13 +99,13 @@ class VGDLJaxEnv:
             grid = grid.at[self._static_type_indices].set(
                 state.static_grids[self._static_grid_indices])
 
-        # Dynamic types: single vectorized scatter
+        # Dynamic types: single vectorized scatter (pixel→cell)
         if self._has_dynamic:
             dyn_pos = state.positions[self._dynamic_type_indices]
             dyn_alive = state.alive[self._dynamic_type_indices]
-            rows = jnp.clip(dyn_pos[:, :, 0].astype(jnp.int32),
+            rows = jnp.clip(dyn_pos[:, :, 0] // self._block_size,
                             0, self._height - 1)
-            cols = jnp.clip(dyn_pos[:, :, 1].astype(jnp.int32),
+            cols = jnp.clip(dyn_pos[:, :, 1] // self._block_size,
                             0, self._width - 1)
             type_idx = jnp.broadcast_to(
                 self._dynamic_type_indices[:, None], dyn_alive.shape)

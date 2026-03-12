@@ -2,17 +2,10 @@ import enum
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 
-# py-vgdl physics operates in pixel coordinates where 1 grid cell = block_size pixels.
-# vgdl-jax positions are in grid-cell units. All physics constants (forces, velocities)
-# from VGDL files are in pixel units and must be divided by this scale factor.
-PHYSICS_SCALE = 24
-
 # Named constants
-AABB_THRESHOLD = 1.0 - 1e-3        # collision overlap threshold (1.0 - AABB_EPS)
 N_DIRECTIONS = 4                     # cardinal directions (UP, DOWN, LEFT, RIGHT)
 DEFAULT_RESOURCE_LIMIT = 100         # fallback resource capacity
 NOISY_AVATAR_NOISE_LEVEL = 0.4      # NoisyRotatingFlippingAvatar noise probability
-GRAVITY_ACCEL = 1.0 / PHYSICS_SCALE  # standard gravity in grid-cell units
 SPRITE_HEADROOM = 10                 # extra slots per type beyond level count
 
 PHYSICS_GRID = 'grid'
@@ -27,6 +20,12 @@ def gvgai_block_size(height, width):
     Note: GVGAI uses max(width, height), not max(height, width).
     """
     return max(2, 800 // max(width, height))
+
+
+def get_block_size(game_def):
+    """Get effective block_size for a game, considering square_size override."""
+    return (game_def.square_size if game_def.square_size > 0
+            else gvgai_block_size(game_def.level.height, game_def.level.width))
 
 
 class SpriteClass(enum.IntEnum):
@@ -319,25 +318,15 @@ MOVING_NPC_CLASSES = frozenset(
 )
 
 
-def gvgai_effective_speed(speed, block_size):
-    """Convert a VGDL speed to GVGAI's effective speed after integer truncation.
+def speed_to_pixels(speed, block_size, physics_type=PHYSICS_GRID):
+    """Convert a VGDL speed to pixel displacement per tick.
 
-    GVGAI GridPhysics: pixel_displacement = (int)(speed * block_size),
-    cell_displacement = pixel_displacement / block_size.
+    GridPhysics: (int)(speed * block_size) — matches GVGAI integer truncation.
+    ContinuousPhysics/GravityPhysics: (int)(speed) — no block_size multiplier.
     """
-    if speed == 0.0:
-        return 0.0
-    return int(speed * block_size) / block_size
-
-
-def effective_speed(sd, block_size):
-    """Resolve a SpriteDef's speed to GVGAI-effective speed.
-
-    GridPhysics types get integer-truncation; continuous/gravity types pass through.
-    """
-    if sd.physics_type in (PHYSICS_CONTINUOUS, PHYSICS_GRAVITY):
-        return sd.speed
-    return gvgai_effective_speed(sd.speed, block_size)
+    if physics_type in (PHYSICS_CONTINUOUS, PHYSICS_GRAVITY):
+        return int(speed)
+    return int(speed * block_size)
 
 
 @dataclass

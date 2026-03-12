@@ -4,33 +4,13 @@ from vgdl_jax.state import GameState
 from vgdl_jax.collision import in_bounds
 from vgdl_jax.data_model import N_DIRECTIONS
 
-# UP, DOWN, LEFT, RIGHT
-DIRECTION_DELTAS = jnp.array([[-1, 0], [1, 0], [0, -1], [0, 1]], dtype=jnp.float32)
+# UP, DOWN, LEFT, RIGHT — int32 for pixel-space arithmetic
+DIRECTION_DELTAS = jnp.array([[-1, 0], [1, 0], [0, -1], [0, 1]], dtype=jnp.int32)
+# Float32 version for orientation comparisons/updates (avoids repeated .astype())
+DIRECTION_DELTAS_F32 = DIRECTION_DELTAS.astype(jnp.float32)
 
 
 # ── Shared helpers ─────────────────────────────────────────────────────
-
-
-def snap_to_pixel_grid(pos, block_size):
-    """Snap float cell-coordinates to the nearest pixel-grid position.
-
-    GVGAI stores positions as integer pixels (rect.x, rect.y). After each
-    movement, positions are inherently on the pixel grid. VGDLx uses float32
-    cell coordinates, so repeated additions of fractional displacements
-    (e.g., speed=0.6 → 16/28 cells per tick) accumulate rounding error.
-
-    This function rounds to the nearest pixel, then converts back to cells:
-        pos_cells = round(pos_cells * block_size) / block_size
-
-    Uses int32 intermediate to avoid float32 division precision errors
-    (e.g., float32(122.0 / 61.0) != 2.0 in JIT).
-    """
-    px = jnp.round(pos * block_size).astype(jnp.int32)
-    # Avoid float32 reciprocal imprecision: integer positions that are exact
-    # multiples of block_size must map back exactly. Use floor-division + remainder.
-    cells = px // block_size
-    rem = px % block_size
-    return cells.astype(jnp.float32) + rem.astype(jnp.float32) / jnp.float32(block_size)
 
 
 def prefix_sum_allocate(alive_mask, source_mask):
@@ -60,9 +40,11 @@ def prefix_sum_allocate(alive_mask, source_mask):
     return should_fill, src_indices
 
 
-def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True,
-                        block_size=0):
+def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True):
     """Apply cooldown-gated movement. Uses orientations if deltas is None.
+
+    Positions are int32 pixels. Speed is int32 pixel displacement per tick.
+    Movement: new_pos = pos + deltas * speed * can_move (pure int32 arithmetic).
 
     GVGAI has two movement paths:
     - passiveMovement (missiles): isFirstTick blocks movement, then clears flag
@@ -71,7 +53,6 @@ def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True,
     Args:
         passive: If True, is_first_tick blocks movement (missile-style).
                  If False, is_first_tick is only cleared, not blocking (chaser-style).
-        block_size: If > 0, snap positions to pixel grid after movement (GridPhysics).
 
     Returns:
         (new_pos, new_timers, can_move, first_tick_mask)
@@ -82,11 +63,10 @@ def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True,
     cooldown_ok = (state.cooldown_timers[type_idx] >= cooldown) & alive
     can_move = (~first_tick & cooldown_ok) if passive else cooldown_ok
     if deltas is None:
-        deltas = state.orientations[type_idx]
-    speed = state.speeds[type_idx]
-    new_pos = state.positions[type_idx] + deltas * speed[:, None] * can_move[:, None]
-    if block_size > 0:
-        new_pos = snap_to_pixel_grid(new_pos, block_size)
+        # Orientations are float32 direction vectors {-1,0,1} — truncate to int32
+        deltas = state.orientations[type_idx].astype(jnp.int32)
+    speed = state.speeds[type_idx]  # [max_n] int32 pixel displacement
+    new_pos = state.positions[type_idx] + deltas * speed[:, None] * can_move[:, None].astype(jnp.int32)
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
     return new_pos, new_timers, can_move, first_tick
 
@@ -114,52 +94,54 @@ def _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=None, rng=None
 # ── NPC movement updates ──────────────────────────────────────────────
 
 
-def update_missile(state: GameState, type_idx, cooldown, block_size=0):
+def update_missile(state: GameState, type_idx, cooldown):
     """Move along fixed orientation each tick (if cooldown met and alive)."""
     new_pos, new_timers, _, first_tick = _move_with_cooldown(
-        state, type_idx, cooldown, block_size=block_size)
+        state, type_idx, cooldown)
     return _apply_npc_move(state, type_idx, new_pos, new_timers,
                            first_tick_mask=first_tick)
 
 
-def update_erratic_missile(state: GameState, type_idx, cooldown, prob, block_size=0):
+def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
     """Missile that randomly changes direction with probability `prob` each tick."""
     rng, key_move, key_dir = jax.random.split(state.rng, 3)
     max_n = state.alive.shape[1]
 
     # Move along current orientation (same as missile)
     new_pos, new_timers, _, first_tick = _move_with_cooldown(
-        state, type_idx, cooldown, block_size=block_size)
+        state, type_idx, cooldown)
 
     # Randomly change direction with probability `prob`
     should_change = (jax.random.uniform(key_move, (max_n,)) < prob) & state.alive[type_idx]
     dir_indices = jax.random.randint(key_dir, (max_n,), 0, N_DIRECTIONS)
-    random_ori = DIRECTION_DELTAS[dir_indices]
+    random_ori = DIRECTION_DELTAS_F32[dir_indices]
     new_ori = jnp.where(should_change[:, None], random_ori, state.orientations[type_idx])
 
     return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng,
                            first_tick_mask=first_tick)
 
 
-def update_random_npc(state: GameState, type_idx, cooldown, cons=0, block_size=0):
+def update_random_npc(state: GameState, type_idx, cooldown, cons=0):
     """Pick a random direction each move. cons>0 repeats direction for N ticks."""
     rng, key = jax.random.split(state.rng)
     max_n = state.alive.shape[1]
     dir_indices = jax.random.randint(key, (max_n,), 0, N_DIRECTIONS)
-    random_deltas = DIRECTION_DELTAS[dir_indices]
+    random_deltas = DIRECTION_DELTAS[dir_indices]  # int32
     if cons > 0:
         # Use current orientation while direction_ticks > 0, else pick new
         ticks = state.direction_ticks[type_idx]
         keep = ticks > 0
-        deltas = jnp.where(keep[:, None], state.orientations[type_idx], random_deltas)
+        # Orientations are float32, convert to int32 for delta
+        cur_deltas = state.orientations[type_idx].astype(jnp.int32)
+        deltas = jnp.where(keep[:, None], cur_deltas, random_deltas)
         new_ticks = jnp.where(keep, ticks - 1, cons)
     else:
         deltas = random_deltas
         new_ticks = None
     new_pos, new_timers, can_move, first_tick = _move_with_cooldown(
-        state, type_idx, cooldown, deltas=deltas, passive=False,
-        block_size=block_size)
-    new_ori = jnp.where(can_move[:, None], deltas, state.orientations[type_idx])
+        state, type_idx, cooldown, deltas=deltas, passive=False)
+    new_ori = jnp.where(can_move[:, None], deltas.astype(jnp.float32),
+                        state.orientations[type_idx])
     state = _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng,
                             first_tick_mask=first_tick)
     if new_ticks is not None:
@@ -168,20 +150,24 @@ def update_random_npc(state: GameState, type_idx, cooldown, cons=0, block_size=0
     return state
 
 
-def _manhattan_distance_field(target_pos, target_alive, height, width):
+def _manhattan_distance_field(target_pos, target_alive, height, width, block_size):
     """Compute Manhattan distance to nearest alive target for every grid cell.
 
     Uses iterative relaxation: O(H*W*(H+W)) total work, O(H+W) depth.
     Returns [H, W] int32 distance field.
+
+    Args:
+        target_pos: [max_n, 2] int32 pixel positions
+        block_size: pixels per cell (for pixel→cell conversion)
     """
     INF = jnp.int32(height + width)
-    # Initialize: 0 at alive target cells, INF elsewhere
     grid = jnp.full((height, width), INF, dtype=jnp.int32)
-    itarget_pos = target_pos.astype(jnp.int32)
-    ib = in_bounds(itarget_pos, height, width)
+    # Convert pixel positions to cells
+    itarget_cell = target_pos // block_size
+    ib = in_bounds(itarget_cell, height, width)
     effective = target_alive & ib
-    r = jnp.clip(itarget_pos[:, 0], 0, height - 1)
-    c = jnp.clip(itarget_pos[:, 1], 0, width - 1)
+    r = jnp.clip(itarget_cell[:, 0], 0, height - 1)
+    c = jnp.clip(itarget_cell[:, 1], 0, width - 1)
     grid = grid.at[r, c].min(jnp.where(effective, jnp.int32(0), INF))
 
     def relax(_, dist):
@@ -198,7 +184,7 @@ def _manhattan_distance_field(target_pos, target_alive, height, width):
 
 def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
                   fleeing=False, height=0, width=0, dist_field=None,
-                  block_size=0):
+                  block_size=1):
     """Move toward (or away from) nearest target using grid distance field. O(H*W + N).
 
     In GVGAI, isFirstTick is cleared in updatePassive() but doesn't block the
@@ -210,18 +196,20 @@ def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
     first_tick = state.is_first_tick[type_idx] & alive
     can_move = (state.cooldown_timers[type_idx] >= cooldown) & alive
 
-    chaser_pos = state.positions[type_idx].astype(jnp.int32)  # [max_n, 2]
-    target_alive = state.alive[target_type_idx]     # [max_n]
+    # Convert pixel positions to cells for distance field lookup
+    chaser_cell = state.positions[type_idx] // block_size  # [max_n, 2] int32
+    target_alive = state.alive[target_type_idx]
     any_target_alive = jnp.any(target_alive)
 
     # Distance field: [H, W] Manhattan distance to nearest alive target
     if dist_field is None:
-        target_pos = state.positions[target_type_idx]  # [max_n, 2]
-        dist_field = _manhattan_distance_field(target_pos, target_alive, height, width)
+        target_pos = state.positions[target_type_idx]
+        dist_field = _manhattan_distance_field(target_pos, target_alive,
+                                               height, width, block_size)
 
     # For each chaser, look up distance at each neighbor direction
-    r = jnp.clip(chaser_pos[:, 0], 0, height - 1)
-    c = jnp.clip(chaser_pos[:, 1], 0, width - 1)
+    r = jnp.clip(chaser_cell[:, 0], 0, height - 1)
+    c = jnp.clip(chaser_cell[:, 1], 0, width - 1)
     INF = jnp.int32(height + width)
     d_up    = jnp.where(r > 0,          dist_field[jnp.clip(r - 1, 0, height - 1), c], INF)
     d_down  = jnp.where(r < height - 1, dist_field[jnp.clip(r + 1, 0, height - 1), c], INF)
@@ -230,35 +218,29 @@ def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
 
     neighbor_dists = jnp.stack([d_up, d_down, d_left, d_right], axis=-1)  # [max_n, 4]
 
-    # GVGAI collects ALL directions that improve distance, then picks one
-    # randomly.  We match this by finding the best distance per sprite and
-    # randomly selecting among tied-best directions.
     if fleeing:
-        best_val = jnp.max(neighbor_dists, axis=-1, keepdims=True)  # [max_n, 1]
+        best_val = jnp.max(neighbor_dists, axis=-1, keepdims=True)
     else:
         best_val = jnp.min(neighbor_dists, axis=-1, keepdims=True)
-    is_best = (neighbor_dists == best_val)  # [max_n, 4] bool — tied-best mask
+    is_best = (neighbor_dists == best_val)
 
-    # Gumbel-max trick: add large random noise only to tied-best directions,
-    # then argmax picks a random one among them.
+    # Gumbel-max trick for random tie-breaking among tied-best directions
     rng, key_tie = jax.random.split(rng)
-    gumbel = jax.random.uniform(key_tie, neighbor_dists.shape)  # [max_n, 4]
-    # Set non-best directions to -1 so they never win argmax
+    gumbel = jax.random.uniform(key_tie, neighbor_dists.shape)
     tie_scores = jnp.where(is_best, gumbel, -1.0)
     best_dir = jnp.argmax(tie_scores, axis=-1)
-    delta = DIRECTION_DELTAS[best_dir]
+    delta = DIRECTION_DELTAS[best_dir]  # int32
 
     # If no targets alive, pick random direction
-    rand_dirs = jax.random.randint(key, (chaser_pos.shape[0],), 0, N_DIRECTIONS)
+    rand_dirs = jax.random.randint(key, (chaser_cell.shape[0],), 0, N_DIRECTIONS)
     rand_delta = DIRECTION_DELTAS[rand_dirs]
     delta = jnp.where(any_target_alive, delta, rand_delta)
 
-    speed = state.speeds[type_idx]  # [max_n] float32
-    new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None]
-    if block_size > 0:
-        new_pos = snap_to_pixel_grid(new_pos, block_size)
+    speed = state.speeds[type_idx]  # [max_n] int32 pixel displacement
+    new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None].astype(jnp.int32)
     new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
-    new_ori = jnp.where(can_move[:, None], delta, state.orientations[type_idx])
+    new_ori = jnp.where(can_move[:, None], delta.astype(jnp.float32),
+                        state.orientations[type_idx])
     return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng,
                            first_tick_mask=first_tick)
 
@@ -306,9 +288,6 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     max_n = state.alive.shape[1]
 
     # Vectorized spawn decision
-    # Use exact match (==) instead of (>=) to match py-vgdl's
-    # `game.time % cooldown == 0` semantics: spawners only get one
-    # chance per cooldown cycle, not retries every tick after eligible.
     is_alive = state.alive[type_idx]
     timer_ready = state.cooldown_timers[type_idx] == cooldown
     under_total = (total <= 0) | (state.spawn_counts[type_idx] < total)
@@ -348,8 +327,7 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     state = state.replace(
         spawn_counts=state.spawn_counts.at[type_idx].set(new_counts))
 
-    # Reset cooldown timers for all spawners that attempted (timer_ready),
-    # not just those that succeeded. Matches py-vgdl's once-per-cycle semantics.
+    # Reset cooldown timers for all spawners that attempted (timer_ready)
     attempted = is_alive & timer_ready & under_total
     new_timers = jnp.where(attempted, 0, state.cooldown_timers[type_idx])
     state = state.replace(
@@ -364,8 +342,11 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     return state
 
 
-def update_spreader(state: GameState, type_idx, spreadprob):
-    """Spreader: at age==2, replicate to 4 adjacent cells with probability `spreadprob` each."""
+def update_spreader(state: GameState, type_idx, spreadprob, block_size=1):
+    """Spreader: at age==2, replicate to 4 adjacent cells with probability `spreadprob` each.
+
+    Neighbor positions are one cell away = block_size pixels in each direction.
+    """
     rng, key = jax.random.split(state.rng)
     max_n = state.alive.shape[1]
 
@@ -373,23 +354,19 @@ def update_spreader(state: GameState, type_idx, spreadprob):
     ages = state.ages[type_idx]
     should_spread = is_alive & (ages == 2)
 
-    # For each spreading sprite, try 4 directions
     # Random gate per sprite per direction
     rng, key_rand = jax.random.split(rng)
     rand_vals = jax.random.uniform(key_rand, (max_n, 4))
-    spread_gates = rand_vals < spreadprob  # [max_n, 4]
+    spread_gates = rand_vals < spreadprob
 
-    # Compute neighbor positions for all spreaders
-    pos = state.positions[type_idx]  # [max_n, 2]
-    # DIRECTION_DELTAS: UP, DOWN, LEFT, RIGHT
-    neighbor_pos = pos[:, None, :] + DIRECTION_DELTAS[None, :, :]  # [max_n, 4, 2]
+    # Neighbor positions: one cell away = block_size pixels
+    pos = state.positions[type_idx]  # [max_n, 2] int32
+    neighbor_pos = pos[:, None, :] + DIRECTION_DELTAS[None, :, :] * block_size  # [max_n, 4, 2]
 
-    # Create flat mask of which (sprite, direction) pairs should spawn
-    spawn_mask = should_spread[:, None] & spread_gates  # [max_n, 4]
-    flat_mask = spawn_mask.reshape(-1)  # [max_n * 4]
-    flat_pos = neighbor_pos.reshape(-1, 2)  # [max_n * 4, 2]
+    spawn_mask = should_spread[:, None] & spread_gates
+    flat_mask = spawn_mask.reshape(-1)
+    flat_pos = neighbor_pos.reshape(-1, 2)
 
-    # Prefix-sum slot allocation
     should_fill, src_idx = prefix_sum_allocate(state.alive[type_idx], flat_mask)
     src_pos = flat_pos[src_idx]
 
@@ -410,24 +387,23 @@ def update_random_inertial(state: GameState, type_idx, mass, strength):
     """RandomInertial: ContinuousPhysics NPC, random force direction each tick.
 
     velocity += (random_direction * strength) / mass
-    position += velocity
+    position += (int32) velocity
     orientation = velocity direction
     """
     rng, key = jax.random.split(state.rng)
     max_n = state.alive.shape[1]
 
     dir_indices = jax.random.randint(key, (max_n,), 0, N_DIRECTIONS)
-    force = DIRECTION_DELTAS[dir_indices] * strength  # [max_n, 2]
+    force = DIRECTION_DELTAS_F32[dir_indices] * strength
 
     vel = state.velocities[type_idx]
     new_vel = vel + force / mass
     is_alive = state.alive[type_idx]
-    # Only update alive sprites
     new_vel = jnp.where(is_alive[:, None], new_vel, vel)
 
-    new_pos = state.positions[type_idx] + new_vel * is_alive[:, None]
+    # Position update: truncate velocity to int32 (matching GVGAI's (int) cast)
+    new_pos = state.positions[type_idx] + (new_vel * is_alive[:, None]).astype(jnp.int32)
 
-    # Orientation from velocity
     speed = jnp.sqrt(jnp.sum(new_vel ** 2, axis=-1, keepdims=True))
     new_ori = jnp.where(
         (speed > 1e-6) & is_alive[:, None],
@@ -449,40 +425,32 @@ def update_walk_jumper(state: GameState, type_idx, prob, strength, gravity, mass
     With probability (1-prob), applies upward velocity impulse when grounded.
     Gravity pulls down every tick.
     """
-    alive = state.alive[type_idx]  # (max_n,)
+    alive = state.alive[type_idx]
     n = alive.shape[0]
-    alive_f = alive.astype(jnp.float32)
 
-    vel = state.velocities[type_idx]  # (max_n, 2)
-    pf = state.passive_forces[type_idx]  # (max_n, 2)
+    vel = state.velocities[type_idx]
+    pf = state.passive_forces[type_idx]
 
-    # Grounded: passive_forces row == 0 means wallStop zeroed it last frame
     grounded = (pf[:, 0] == 0.0)
 
-    # Random jump: py-vgdl uses `prob < random()` → jump probability = 1-prob
     rng, key = jax.random.split(state.rng)
     rand_vals = jax.random.uniform(key, (n,))
     wants_jump = (rand_vals > prob) & grounded & alive
 
-    # Horizontal direction from orientation col component
     h_dir = state.orientations[type_idx, :, 1]
 
-    # Active forces
     active_row = jnp.where(wants_jump, -strength, 0.0)
-    active_col = h_dir * strength * alive_f
+    active_col = h_dir * strength * alive.astype(jnp.float32)
 
-    # Friction: horizontal friction when grounded (decelerates to allow jump direction to dominate)
     friction_col = jnp.where(grounded, -vel[:, 1] / mass, 0.0)
 
-    # Velocity update
     new_vel_row = vel[:, 0] + active_row / mass + gravity
     new_vel_col = vel[:, 1] + (active_col + friction_col) / mass
     new_vel = jnp.stack([new_vel_row, new_vel_col], axis=-1)
 
-    # Position update (only alive sprites move)
-    new_pos = state.positions[type_idx] + new_vel * alive_f[:, None]
+    # Position update: truncate velocity to int32
+    new_pos = state.positions[type_idx] + (new_vel * alive.astype(jnp.float32)[:, None]).astype(jnp.int32)
 
-    # Reset passive forces to gravity (wallStop will zero on landing)
     new_pf_row = jnp.where(alive, gravity * mass, pf[:, 0])
     new_pf = jnp.stack([new_pf_row, pf[:, 1]], axis=-1)
 
@@ -502,21 +470,21 @@ def update_inertial_avatar(state: GameState, action, avatar_type, n_move,
     """InertialAvatar: ContinuousPhysics, no gravity. Input = force direction.
 
     velocity += (direction * strength) / mass
-    position += velocity
+    position += (int32) velocity
     orientation = velocity direction (for rendering)
     """
     is_move = action < n_move
     move_idx = jnp.clip(action, 0, 3)
     force = jax.lax.cond(
         is_move,
-        lambda: DIRECTION_DELTAS[move_idx] * strength,
+        lambda: DIRECTION_DELTAS_F32[move_idx] * strength,
         lambda: jnp.array([0.0, 0.0], dtype=jnp.float32))
 
     vel = state.velocities[avatar_type, 0]
     new_vel = vel + force / mass
-    new_pos = state.positions[avatar_type, 0] + new_vel
+    # Truncate to int32 for position update (matching GVGAI's (int) cast)
+    new_pos = state.positions[avatar_type, 0] + new_vel.astype(jnp.int32)
 
-    # Orientation from velocity (if nonzero)
     speed = jnp.sqrt(jnp.sum(new_vel ** 2))
     new_ori = jnp.where(speed > 1e-6, new_vel / speed,
                         state.orientations[avatar_type, 0])
@@ -539,8 +507,6 @@ def update_mario_avatar(state: GameState, action, avatar_type,
     Gravity = (+gravity_val, 0) in row direction.
     Jump = negative row velocity (upward).
     """
-    # Decode action → (horizontal_dir, wants_jump)
-    # LEFT=0: h=-1, RIGHT=1: h=+1, JUMP=2: h=0, JUMP_LEFT=3: h=-1, JUMP_RIGHT=4: h=+1, NOOP=5: h=0
     h = jnp.where(
         (action == 0) | (action == 3), -1.0,
         jnp.where((action == 1) | (action == 4), 1.0, 0.0))
@@ -549,38 +515,25 @@ def update_mario_avatar(state: GameState, action, avatar_type,
     vel = state.velocities[avatar_type, 0]
     pf = state.passive_forces[avatar_type, 0]
 
-    # Grounded: passive_forces[row] == 0 means wallStop zeroed it last frame
     grounded = (pf[0] == 0.0)
 
-    # Active force computation (5 cases)
-    # Case 1: grounded + jump → (-jump_strength, h * strength)
-    # Case 2: airborne + airsteering → (0, h * strength)
-    # Case 3: airborne + no steering → (0, 0)
-    # Case 4: grounded + horizontal → (0, h * strength)
-    # Case 5: else → (0, 0)
     active_row = jnp.where(grounded & wants_jump, -jump_strength, 0.0)
     active_col = jnp.where(
         grounded | airsteering, h * strength, 0.0)
     active_force = jnp.array([active_row, active_col])
 
-    # Friction: on ground or with airsteering, apply horizontal friction
     friction_col = jnp.where(
         grounded | airsteering, -vel[1] / mass, 0.0)
     friction_force = jnp.array([0.0, friction_col])
 
-    # Velocity update
     new_vel = vel + (active_force + friction_force) / mass
-
-    # Apply gravity
     new_vel = new_vel.at[0].add(gravity)
 
-    # Position update
-    new_pos = state.positions[avatar_type, 0] + new_vel
+    # Position update: truncate velocity to int32
+    new_pos = state.positions[avatar_type, 0] + new_vel.astype(jnp.int32)
 
-    # Reset passive_forces to gravity (wallStop will zero on landing)
     new_pf = jnp.array([gravity * mass, 0.0])
 
-    # Orientation: face movement direction (horizontal only for Mario)
     new_ori = jnp.where(
         jnp.abs(h) > 0.0,
         jnp.array([0.0, h]),

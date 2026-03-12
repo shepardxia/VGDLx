@@ -13,15 +13,14 @@ import jax
 import jax.numpy as jnp
 
 from vgdl_jax.data_model import (
-    GameDef, SpriteClass, TerminationType, PHYSICS_SCALE,
+    GameDef, SpriteClass, TerminationType,
     STATIC_CLASSES, AVATAR_CLASSES, MOVING_NPC_CLASSES, SPRITE_REGISTRY,
     CompiledEffect, AvatarConfig, SpriteConfig,
-    DEFAULT_RESOURCE_LIMIT, GRAVITY_ACCEL,
+    DEFAULT_RESOURCE_LIMIT,
     SPRITE_HEADROOM, N_DIRECTIONS,
     PHYSICS_CONTINUOUS, PHYSICS_GRAVITY,
-    effective_speed,
+    speed_to_pixels, get_block_size,
     GVGAI_ACTION_TO_DIR,
-    gvgai_block_size,
 )
 from vgdl_jax.effects import compile_effect_kwargs, CompileContext, ALIVE_MODIFYING_EFFECTS, POSITION_MODIFYING_EFFECTS
 from vgdl_jax.state import GameState, create_initial_state
@@ -47,11 +46,6 @@ def _resolve_first(game_def, stype, default=None):
         return default
     indices = game_def.resolve_stype(stype)
     return indices[0] if indices else default
-
-
-def _gvgai_block_size(height, width):
-    """Deprecated: use data_model.gvgai_block_size() instead."""
-    return gvgai_block_size(height, width)
 
 
 def _find_avatar(game_def):
@@ -150,24 +144,25 @@ def _find_static_types(game_def):
     return static_type_indices, static_type_set, static_grid_map
 
 
-def _select_collision_mode(a_static, b_static, a_frac, b_frac, speed_a, speed_b):
-    """Select collision detection mode for an effect pair."""
+def _select_collision_mode(a_static, b_static, speed_a_px, speed_b_px, block_size):
+    """Select collision detection mode for an effect pair.
+
+    With int32 pixel coordinates, collision modes are:
+    - grid: both sprites land on cell boundaries (speed_px % block_size == 0)
+    - pixel_aabb: at least one sprite can land mid-cell
+    - sweep: speed exceeds one cell per tick
+    - static_b_grid / static_a_grid / static_both: one or both are static grids
+    """
     if a_static and b_static:
-        # Not matched by collision_mode dispatch; step.py uses static_a_grid_idx check instead
         return 'static_both'
     elif b_static:
-        return 'static_b_expanded' if a_frac else 'static_b_grid'
+        return 'static_b_grid'
     elif a_static:
-        # Not matched by collision_mode dispatch; step.py uses static_a_grid_idx check instead
         return 'static_a_grid'
-    elif speed_a > 1.0 or speed_b > 1.0:
+    elif speed_a_px > block_size or speed_b_px > block_size:
         return 'sweep'
-    elif a_frac and not b_frac:
-        return 'expanded_grid_a'
-    elif b_frac and not a_frac:
-        return 'expanded_grid_b'
-    elif a_frac and b_frac:
-        return 'aabb'
+    elif (speed_a_px % block_size != 0) or (speed_b_px % block_size != 0):
+        return 'pixel_aabb'
     else:
         return 'grid'
 
@@ -189,7 +184,7 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
         proj_type_idx = _resolve_first(game_def, avatar_sd.spawner_stype, -1)
         if proj_type_idx >= 0:
             proj_sd = game_def.sprites[proj_type_idx]
-            proj_speed = effective_speed(proj_sd, block_size)
+            proj_speed = speed_to_pixels(proj_sd.speed, block_size, proj_sd.physics_type)
             if avatar_sd.sprite_class == SpriteClass.SHOOT_AVATAR:
                 proj_ori_from_avatar = True
             else:
@@ -210,10 +205,10 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
         direction_offset=direction_offset,
         physics_type=avatar_sd.physics_type,
         mass=avatar_sd.mass,
-        strength=avatar_sd.strength / PHYSICS_SCALE,
-        jump_strength=avatar_sd.jump_strength / PHYSICS_SCALE,
+        strength=float(avatar_sd.strength),
+        jump_strength=float(avatar_sd.jump_strength),
         airsteering=avatar_sd.airsteering,
-        gravity=GRAVITY_ACCEL,
+        gravity=1.0,
         is_rotating=sc_def.is_rotating,
         is_flipping=sc_def.is_flipping,
         noise_level=sc_def.noise_level,
@@ -236,96 +231,45 @@ def _build_action_map(sc_def, avatar_config):
     direction_offset = avatar_config.direction_offset
     shoot_internal = avatar_config.shoot_action_idx  # n_move + 1 if can_shoot, else -1
 
-    # Special case: MarioAvatar has hardcoded internal action encoding
-    # Internal: LEFT=0, RIGHT=1, JUMP=2, JUMP_LEFT=3, JUMP_RIGHT=4, NOOP=5
-    # GVGAI: [LEFT, RIGHT, USE, NIL] → [0, 1, 2, 5]
+    # Build name→internal mapping based on avatar type.
+    # Each case defines the complete set of valid action names.
     if sc_def.physics_type == PHYSICS_GRAVITY:
-        action_map = []
-        for name in sc_def.gvgai_actions:
-            if name == 'ACTION_NIL':
-                action_map.append(5)  # internal NOOP
-            elif name == 'ACTION_USE':
-                action_map.append(2)  # internal JUMP
-            elif name == 'ACTION_LEFT':
-                action_map.append(0)
-            elif name == 'ACTION_RIGHT':
-                action_map.append(1)
-            else:
-                raise ValueError(f"Unexpected action {name} for MarioAvatar")
-        return jnp.array(action_map, dtype=jnp.int32)
+        # MarioAvatar: LEFT=0, RIGHT=1, JUMP=2, JUMP_LEFT=3, JUMP_RIGHT=4, NOOP=5
+        mapping = {
+            'ACTION_NIL': 5, 'ACTION_USE': 2,
+            'ACTION_LEFT': 0, 'ACTION_RIGHT': 1,
+        }
+    elif sc_def.is_rotating:
+        # Ego-centric: forward=0, back=1, CCW=2, CW=3, NOOP=n_move
+        mapping = {
+            'ACTION_NIL': n_move, 'ACTION_USE': shoot_internal,
+            'ACTION_UP': 0, 'ACTION_DOWN': 1,
+            'ACTION_LEFT': 2, 'ACTION_RIGHT': 3,
+        }
+    elif sc_def.is_aimed and sc_def.can_move_aimed:
+        # AimedFlakAvatar: left=0, right=1, aim_up=2, aim_down=3
+        mapping = {
+            'ACTION_NIL': n_move, 'ACTION_USE': shoot_internal,
+            'ACTION_LEFT': 0, 'ACTION_RIGHT': 1,
+            'ACTION_UP': 2, 'ACTION_DOWN': 3,
+        }
+    elif sc_def.is_aimed:
+        # AimedAvatar: aim_up=0, aim_down=1
+        mapping = {
+            'ACTION_NIL': n_move, 'ACTION_USE': shoot_internal,
+            'ACTION_UP': 0, 'ACTION_DOWN': 1,
+        }
+    else:
+        # General case: direction actions via GVGAI_ACTION_TO_DIR
+        mapping = {'ACTION_NIL': n_move, 'ACTION_USE': shoot_internal}
+        for name, dir_idx in GVGAI_ACTION_TO_DIR.items():
+            mapping[name] = dir_idx - direction_offset
 
-    # Special case: rotating avatars use ego-centric actions
-    # Internal: forward=0, back=1, CCW=2, CW=3, NOOP=4
-    # GVGAI ordering [LEFT, RIGHT, DOWN, UP, NIL]:
-    #   LEFT→CCW(2), RIGHT→CW(3), DOWN→back(1), UP→forward(0), NIL→NOOP(4)
-    if sc_def.is_rotating:
-        action_map = []
-        for name in sc_def.gvgai_actions:
-            if name == 'ACTION_NIL':
-                action_map.append(n_move)  # NOOP
-            elif name == 'ACTION_USE':
-                action_map.append(shoot_internal)
-            elif name == 'ACTION_LEFT':
-                action_map.append(2)  # CCW
-            elif name == 'ACTION_RIGHT':
-                action_map.append(3)  # CW
-            elif name == 'ACTION_DOWN':
-                action_map.append(1)  # back
-            elif name == 'ACTION_UP':
-                action_map.append(0)  # forward
-            else:
-                raise ValueError(f"Unexpected action {name} for RotatingAvatar")
-        return jnp.array(action_map, dtype=jnp.int32)
-
-    # Special case: aimed avatars
-    # AimedAvatar internal: aim_up=0, aim_down=1, NOOP=n_move(2), SHOOT=n_move+1(3)
-    # AimedFlakAvatar internal: left=0, right=1, aim_up=2, aim_down=3, NOOP=n_move(4), SHOOT=n_move+1(5)
-    if sc_def.is_aimed:
-        action_map = []
-        if sc_def.can_move_aimed:
-            # AimedFlakAvatar: LEFT=0, RIGHT=1, AIM_UP=2, AIM_DOWN=3 internally
-            for name in sc_def.gvgai_actions:
-                if name == 'ACTION_NIL':
-                    action_map.append(n_move)
-                elif name == 'ACTION_USE':
-                    action_map.append(shoot_internal)
-                elif name == 'ACTION_LEFT':
-                    action_map.append(0)
-                elif name == 'ACTION_RIGHT':
-                    action_map.append(1)
-                elif name == 'ACTION_UP':
-                    action_map.append(2)  # aim_up
-                elif name == 'ACTION_DOWN':
-                    action_map.append(3)  # aim_down
-                else:
-                    raise ValueError(f"Unexpected action {name} for AimedFlakAvatar")
-        else:
-            # AimedAvatar: AIM_UP=0, AIM_DOWN=1 internally
-            for name in sc_def.gvgai_actions:
-                if name == 'ACTION_NIL':
-                    action_map.append(n_move)
-                elif name == 'ACTION_USE':
-                    action_map.append(shoot_internal)
-                elif name == 'ACTION_UP':
-                    action_map.append(0)  # aim_up
-                elif name == 'ACTION_DOWN':
-                    action_map.append(1)  # aim_down
-                else:
-                    raise ValueError(f"Unexpected action {name} for AimedAvatar")
-        return jnp.array(action_map, dtype=jnp.int32)
-
-    # General case: standard avatars (MovingAvatar, OrientedAvatar,
-    # HorizontalAvatar, VerticalAvatar, ShootAvatar, FlakAvatar,
-    # ShootEverywhereAvatar, InertialAvatar)
     action_map = []
     for name in sc_def.gvgai_actions:
-        if name == 'ACTION_NIL':
-            action_map.append(n_move)  # NOOP
-        elif name == 'ACTION_USE':
-            action_map.append(shoot_internal)
-        else:
-            dir_idx = GVGAI_ACTION_TO_DIR[name]
-            action_map.append(dir_idx - direction_offset)
+        if name not in mapping:
+            raise ValueError(f"Unexpected action {name} for {sc_def.vgdl_names}")
+        action_map.append(mapping[name])
     return jnp.array(action_map, dtype=jnp.int32)
 
 
@@ -349,12 +293,12 @@ def _build_sprite_configs(game_def, block_size):
             cfg.prob = sd.spawner_prob
         elif sd.sprite_class == SpriteClass.RANDOM_INERTIAL:
             cfg.mass = sd.mass
-            cfg.strength = sd.strength / PHYSICS_SCALE
+            cfg.strength = float(sd.strength)
         elif sd.sprite_class == SpriteClass.WALK_JUMPER:
             cfg.mass = sd.mass
-            cfg.strength = sd.strength / PHYSICS_SCALE
+            cfg.strength = float(sd.strength)
             cfg.prob = sd.spawner_prob
-            cfg.gravity = GRAVITY_ACCEL
+            cfg.gravity = 1.0
         elif sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
             target_idx = _resolve_first(game_def, sd.spawner_stype, -1)
             cfg.target_type_idx = target_idx if target_idx >= 0 else 0
@@ -366,10 +310,10 @@ def _build_sprite_configs(game_def, block_size):
             if target_idx >= 0:
                 target_sd = game_def.sprites[target_idx]
                 cfg.target_orientation = tuple(target_sd.orientation)
-                cfg.target_speed = effective_speed(target_sd, block_size)
+                cfg.target_speed = speed_to_pixels(target_sd.speed, block_size, target_sd.physics_type)
             else:
                 cfg.target_orientation = (0., 0.)
-                cfg.target_speed = 0.0
+                cfg.target_speed = 0
 
         sprite_configs.append(cfg)
     return sprite_configs
@@ -379,13 +323,9 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                              type_max_n, resource_name_to_idx, resource_limits,
                              avatar_type_idx, block_size):
     """Build list of CompiledEffects from game definition."""
-    continuous_types = {sd.type_idx for sd in game_def.sprites
-                        if sd.physics_type in (PHYSICS_CONTINUOUS, PHYSICS_GRAVITY)}
-    # Use effective speeds for collision mode detection
-    _speed_by_idx = {sd.type_idx: effective_speed(sd, block_size) for sd in game_def.sprites}
-    fractional_speed_types = {idx for idx, spd in _speed_by_idx.items()
-                               if spd != 1.0 and spd > 0}
-    frac_or_cont = continuous_types | fractional_speed_types
+    # Pixel speeds for collision mode detection
+    _speed_px_by_idx = {sd.type_idx: speed_to_pixels(sd.speed, block_size, sd.physics_type)
+                        for sd in game_def.sprites}
 
     compiled_effects = []
     for ed in game_def.effects:
@@ -412,14 +352,15 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
             actee_indices = game_def.resolve_stype(ed.actee_stype)
             for ta_idx in actor_indices:
                 for tb_idx in actee_indices:
-                    speed_a = _speed_by_idx.get(ta_idx, 1.0)
-                    speed_b = _speed_by_idx.get(tb_idx, 1.0)
+                    speed_a_px = _speed_px_by_idx.get(ta_idx, 0)
+                    speed_b_px = _speed_px_by_idx.get(tb_idx, 0)
                     collision_mode = _select_collision_mode(
                         a_static=ta_idx in static_type_set,
                         b_static=tb_idx in static_type_set,
-                        a_frac=ta_idx in frac_or_cont,
-                        b_frac=tb_idx in frac_or_cont,
-                        speed_a=speed_a, speed_b=speed_b)
+                        speed_a_px=speed_a_px, speed_b_px=speed_b_px,
+                        block_size=block_size)
+                    # max_speed_cells: for sweep collision
+                    max_speed_px = max(speed_a_px, speed_b_px, 1)
                     compiled_effects.append(CompiledEffect(
                         type_a=ta_idx,
                         type_b=tb_idx,
@@ -427,7 +368,7 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                         effect_type=ed.effect_type,
                         score_change=ed.score_change,
                         collision_mode=collision_mode,
-                        max_speed_cells=max(1, math.ceil(max(speed_a, speed_b))),
+                        max_speed_cells=max(1, math.ceil(max_speed_px / block_size)),
                         max_a=type_max_n[ta_idx],
                         max_b=type_max_n[tb_idx],
                         static_a_grid_idx=static_grid_map.get(ta_idx),
@@ -523,7 +464,7 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
     n_static = len(static_type_indices)
 
     # GVGAI speed conversion: square_size overrides calculated block_size
-    block_size = game_def.square_size if game_def.square_size > 0 else _gvgai_block_size(height, width)
+    block_size = get_block_size(game_def)
 
     # Compute per-type max_n from level sprite counts + headroom
     if max_sprites_per_type is None:
@@ -560,7 +501,7 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
         if slot >= max_n:
             continue
         sd = game_def.sprites[type_idx]
-        eff_speed = effective_speed(sd, block_size)
+        speed_px = speed_to_pixels(sd.speed, block_size, sd.physics_type)
         cd = max(sd.cooldown, 1)
         sc_def = SPRITE_REGISTRY.get(sd.sprite_class)
         # SpawnPoint/Bomber: cooldown_timers=cd-1 so they fire on tick 1
@@ -581,11 +522,11 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
                     else sd.orientation)
         state = state.replace(
             positions=state.positions.at[type_idx, slot].set(
-                jnp.array([row, col], dtype=jnp.float32)),
+                jnp.array([row * block_size, col * block_size], dtype=jnp.int32)),
             alive=state.alive.at[type_idx, slot].set(True),
             orientations=state.orientations.at[type_idx, slot].set(
                 jnp.array(init_ori, dtype=jnp.float32)),
-            speeds=state.speeds.at[type_idx, slot].set(jnp.float32(eff_speed)),
+            speeds=state.speeds.at[type_idx, slot].set(jnp.int32(speed_px)),
             cooldown_timers=state.cooldown_timers.at[type_idx, slot].set(
                 jnp.int32(init_timer)),
             is_first_tick=state.is_first_tick.at[type_idx, slot].set(init_first_tick),
@@ -640,7 +581,7 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
             from vgdl_jax.sprites import _manhattan_distance_field
             static_distance_fields[target_idx] = _manhattan_distance_field(
                 state.positions[target_idx], state.alive[target_idx],
-                height, width)
+                height, width, block_size)
 
     # Compile-time validation
     if avatar_config.can_shoot and avatar_config.projectile_type_idx < 0:

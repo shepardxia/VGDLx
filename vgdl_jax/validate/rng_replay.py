@@ -132,7 +132,7 @@ class RNGRecorder:
 
 
 def patch_chaser_directions(record, prev_jax_state, sprite_configs,
-                            height, width):
+                            height, width, block_size=1):
     """Recompute actual chaser/fleeing directions using the distance field.
 
     Instead of extracting directions from position deltas (which fails for
@@ -145,6 +145,7 @@ def patch_chaser_directions(record, prev_jax_state, sprite_configs,
         sprite_configs: list of sprite config dicts
         height: grid height
         width: grid width
+        block_size: pixels per cell
     """
     from vgdl_jax.sprites import _manhattan_distance_field
 
@@ -158,7 +159,7 @@ def patch_chaser_directions(record, prev_jax_state, sprite_configs,
         fleeing = (sc == SpriteClass.FLEEING)
         target_type_idx = cfg.get('target_type_idx', 0)
 
-        chaser_pos = prev_jax_state.positions[type_idx].astype(jnp.int32)
+        chaser_pos = prev_jax_state.positions[type_idx]  # int32 pixels
         target_pos = prev_jax_state.positions[target_type_idx]
         target_alive = prev_jax_state.alive[target_type_idx]
         any_target_alive = bool(jnp.any(target_alive))
@@ -169,10 +170,12 @@ def patch_chaser_directions(record, prev_jax_state, sprite_configs,
 
         # Recompute distance field (same as update_chaser)
         dist_field = _manhattan_distance_field(target_pos, target_alive,
-                                               height, width)
+                                               height, width, block_size)
 
-        r = np.array(jnp.clip(chaser_pos[:, 0], 0, height - 1))
-        c = np.array(jnp.clip(chaser_pos[:, 1], 0, width - 1))
+        # Pixel→cell for distance field lookup
+        chaser_cells = chaser_pos // block_size
+        r = np.array(jnp.clip(chaser_cells[:, 0], 0, height - 1))
+        c = np.array(jnp.clip(chaser_cells[:, 1], 0, width - 1))
         INF = height + width
         d_up = np.where(r > 0,
                         np.array(dist_field)[np.clip(r - 1, 0, height - 1), c], INF)
@@ -396,7 +399,7 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
                 basedirs_idx = _ORI_TO_BASEDIRS.get(
                     (round(float(ori_r)), round(float(ori_c))), -1)
                 entries.append({
-                    "pos": [float(r) * block_size, float(c) * block_size],
+                    "pos": [float(r), float(c)],  # already in pixels
                     "dir": basedirs_idx,
                 })
             record[sd.key] = entries
@@ -422,7 +425,7 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
             for slot in slots:
                 r, c = pre_pos[ti, slot, 0], pre_pos[ti, slot, 1]
                 entries.append({
-                    "pos": [float(r) * block_size, float(c) * block_size],
+                    "pos": [float(r), float(c)],  # already in pixels
                     "roll": roll,
                 })
             record[sd.key] = entries
@@ -444,12 +447,9 @@ def build_gvgai_rng_records(compiled, game_def, actions, seed=42):
         and raw_states is the list of GameState objects [init, step1, step2, ...].
     """
     import jax
-    from vgdl_jax.data_model import gvgai_block_size
+    from vgdl_jax.data_model import get_block_size
 
-    h = game_def.level.height
-    w = game_def.level.width
-    block_size = (game_def.square_size if game_def.square_size > 0
-                  else gvgai_block_size(h, w))
+    block_size = get_block_size(game_def)
 
     # Build spawn target map: {spawner_type_idx: target_type_idx}
     spawn_target_map = {}

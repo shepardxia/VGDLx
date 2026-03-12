@@ -297,19 +297,21 @@ def run_jax_trajectory(entry: GameEntry, actions, seed=42, level_idx=0):
     """
     import jax
     from .state_extractor import extract_jax_state
+    from vgdl_jax.data_model import get_block_size
 
     compiled, game_def = setup_jax_game(entry, level_idx)
     sgm = compiled.static_grid_map
+    bs = get_block_size(game_def)
     state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
 
     # Initial state
-    states = [extract_jax_state(state, game_def, static_grid_map=sgm)]
+    states = [extract_jax_state(state, game_def, static_grid_map=sgm, block_size=bs)]
 
     for action_idx in actions:
         if bool(state.done):
             break
         state = compiled.step_fn(state, action_idx)
-        states.append(extract_jax_state(state, game_def, static_grid_map=sgm))
+        states.append(extract_jax_state(state, game_def, static_grid_map=sgm, block_size=bs))
 
     return states
 
@@ -329,10 +331,13 @@ def run_comparison(entry: GameEntry, actions, seed=42, use_rng_replay=False, lev
     """
     import jax
     from .state_extractor import extract_pyvgdl_state, extract_jax_state
+    from vgdl_jax.data_model import gvgai_block_size
 
     # ── Set up JAX side ──
     compiled, game_def = setup_jax_game(entry, level_idx)
     sgm = compiled.static_grid_map
+    bs = (game_def.square_size if game_def.square_size > 0
+          else gvgai_block_size(game_def.level.height, game_def.level.width))
     jax_state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
 
     # ── Set up py-vgdl side ──
@@ -358,7 +363,7 @@ def run_comparison(entry: GameEntry, actions, seed=42, use_rng_replay=False, lev
 
     # ── Compare initial state ──
     pv_state = extract_pyvgdl_state(game, sprite_key_order, block_size)
-    jx_state = extract_jax_state(jax_state, game_def, static_grid_map=sgm)
+    jx_state = extract_jax_state(jax_state, game_def, static_grid_map=sgm, block_size=bs)
     matches, diffs = compare_states(pv_state, jx_state)
 
     step_comparisons = [StepComparison(
@@ -390,14 +395,15 @@ def run_comparison(entry: GameEntry, actions, seed=42, use_rng_replay=False, lev
         if recorder is not None:
             from .rng_replay import patch_chaser_directions
             patch_chaser_directions(record, prev_jax_state, sprite_configs,
-                                    game_def.level.height, game_def.level.width)
+                                    game_def.level.height, game_def.level.width,
+                                    block_size=bs)
             rng_replay.set_step_record(record)
 
         if not pv_done:
             game.tick(action_keys[action_idx])
 
         pv_state = extract_pyvgdl_state(game, sprite_key_order, block_size)
-        jx_state = extract_jax_state(jax_state, game_def, static_grid_map=sgm)
+        jx_state = extract_jax_state(jax_state, game_def, static_grid_map=sgm, block_size=bs)
         matches, diffs = compare_states(pv_state, jx_state)
 
         step_comparisons.append(StepComparison(
@@ -431,9 +437,11 @@ def run_gvgai_comparison(entry: GameEntry, actions, seed=42, level_idx=0,
     """
     from .backend_gvgai import run_gvgai_trajectory, normalize_gvgai_state
     from .state_extractor import extract_jax_state
+    from vgdl_jax.data_model import get_block_size
 
     compiled, game_def = setup_jax_game(entry, level_idx)
     sgm = compiled.static_grid_map
+    bs = get_block_size(game_def)
 
     # ── Run JAX side + optionally build RNG replay ──
     rng_file_path = None
@@ -444,7 +452,7 @@ def run_gvgai_comparison(entry: GameEntry, actions, seed=42, level_idx=0,
         # Single trajectory run: produces both RNG records and raw states
         records, raw_states = build_gvgai_rng_records(
             compiled, game_def, actions, seed)
-        jax_states = [extract_jax_state(s, game_def, static_grid_map=sgm)
+        jax_states = [extract_jax_state(s, game_def, static_grid_map=sgm, block_size=bs)
                       for s in raw_states]
 
         tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
