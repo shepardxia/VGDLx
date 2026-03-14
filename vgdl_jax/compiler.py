@@ -202,6 +202,13 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
         min_ammo = avatar_sd.min_ammo
         ammo_cost = avatar_sd.ammo_cost
 
+    # RC4: projectile_offset — ShootAvatar/ShootEverywhereAvatar spawn one cell ahead
+    _PROJECTILE_OFFSET_CLASSES = {
+        SpriteClass.SHOOT_AVATAR,
+        SpriteClass.SHOOT_EVERYWHERE_AVATAR,
+    }
+    projectile_offset = avatar_sd.sprite_class in _PROJECTILE_OFFSET_CLASSES
+
     avatar_config = AvatarConfig(
         avatar_type_indices=avatar_type_indices,
         n_move_actions=n_move,
@@ -230,6 +237,8 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
         ammo_resource_idx=ammo_resource_idx,
         min_ammo=min_ammo,
         ammo_cost=ammo_cost,
+        rotate_in_place=avatar_sd.rotate_in_place,
+        projectile_offset=projectile_offset,
     )
     return avatar_config, n_move
 

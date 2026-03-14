@@ -364,6 +364,7 @@ class SpriteDef:
     ammo: Optional[str] = None           # RC8: resource name used as ammo (FlakAvatar)
     min_ammo: int = -1                   # RC8: minimum ammo to shoot (-1 = use >0 check)
     ammo_cost: int = 1                   # RC8: ammo consumed per shot
+    rotate_in_place: bool = False        # RC2: OrientedAvatar rotateInPlace (default True for oriented avatars)
 
 
 @dataclass
@@ -458,6 +459,8 @@ class AvatarConfig:
     ammo_resource_idx: int = -1   # RC8: resource index for ammo (-1 = no ammo check)
     min_ammo: int = -1            # RC8: minimum ammo to shoot (-1 = use >0 check)
     ammo_cost: int = 1            # RC8: ammo consumed per shot
+    rotate_in_place: bool = False  # RC2: OrientedAvatar rotateInPlace — rotate first, then move
+    projectile_offset: bool = False  # RC4: ShootAvatar spawns projectile one cell ahead
 
 
 @dataclass

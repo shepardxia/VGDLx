@@ -358,6 +358,15 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
     min_ammo = int(args.get('minAmmo', -1))
     ammo_cost = int(args.get('ammoCost', 1))
 
+    # RC2: rotateInPlace — OrientedAvatar subclasses default to True
+    _ROTATE_IN_PLACE_CLASSES = {
+        SpriteClass.ORIENTED_AVATAR,
+        SpriteClass.SHOOT_AVATAR,
+        SpriteClass.SHOOT_EVERYWHERE_AVATAR,
+    }
+    rotate_in_place_default = sc in _ROTATE_IN_PLACE_CLASSES
+    rotate_in_place = bool(args.get('rotateInPlace', rotate_in_place_default))
+
     return SpriteDef(
         key=key,
         type_idx=type_idx,
@@ -389,6 +398,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
         ammo=ammo,
         min_ammo=min_ammo,
         ammo_cost=ammo_cost,
+        rotate_in_place=rotate_in_place,
     )
 
 
