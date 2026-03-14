@@ -361,6 +361,9 @@ class SpriteDef:
     airsteering: bool = False            # MarioAvatar air control
     angle_diff: float = 0.05             # AimedAvatar rotation step (radians)
     cons: int = 0                        # RandomNPC: repeat direction for N consecutive ticks
+    ammo: Optional[str] = None           # RC8: resource name used as ammo (FlakAvatar)
+    min_ammo: int = -1                   # RC8: minimum ammo to shoot (-1 = use >0 check)
+    ammo_cost: int = 1                   # RC8: ammo consumed per shot
 
 
 @dataclass
@@ -452,6 +455,9 @@ class AvatarConfig:
     is_aimed: bool = False
     can_move_aimed: bool = False
     angle_diff: float = 0.05
+    ammo_resource_idx: int = -1   # RC8: resource index for ammo (-1 = no ammo check)
+    min_ammo: int = -1            # RC8: minimum ammo to shoot (-1 = use >0 check)
+    ammo_cost: int = 1            # RC8: ammo consumed per shot
 
 
 @dataclass
@@ -469,4 +475,5 @@ class SpriteConfig:
     spawn_cooldown: int = 1
     target_orientation: Tuple[float, float] = (0.0, 0.0)
     target_speed: float = 0.0
+    target_singleton: bool = False  # RC7: refuse to spawn if target already alive
     cons: int = 0  # RandomNPC: repeat same direction for N consecutive ticks

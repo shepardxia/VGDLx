@@ -102,6 +102,20 @@ def _pre_movement(state, type_idx):
                       state.cooldown_timers[type_idx])))
 
 
+def _pre_spawn(state, type_idx):
+    """Increment spawn_timers for SpawnPoint/Bomber types.
+
+    Spawn timing is independent of movement timing (RC3). In GVGAI, spawn
+    readiness uses (start+gameTick)%cooldown while movement uses lastmove —
+    two independent systems.
+    """
+    return state.replace(
+        spawn_timers=state.spawn_timers.at[type_idx].set(
+            jnp.where(state.alive[type_idx],
+                      state.spawn_timers[type_idx] + 1,
+                      state.spawn_timers[type_idx])))
+
+
 def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                   chaser_target_set=frozenset(),
                   static_distance_fields=None,
@@ -617,6 +631,15 @@ def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_
         if cfg.projectile_singleton:
             is_shoot = is_shoot & ~jnp.any(state.alive[proj_type])
 
+        # RC8: ammo check — FlakAvatar/AimedFlakAvatar need ammo to shoot
+        if cfg.ammo_resource_idx >= 0:
+            ammo_count = state.resources[avatar_type, 0, cfg.ammo_resource_idx]
+            if cfg.min_ammo >= 0:
+                has_ammo = ammo_count > cfg.min_ammo
+            else:
+                has_ammo = ammo_count > 0
+            is_shoot = is_shoot & has_ammo
+
         if cfg.shoot_everywhere:
             def _shoot_everywhere(s):
                 for i in range(4):
@@ -640,6 +663,15 @@ def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_
                 state,
             )
 
+        # RC8: subtract ammo cost after shooting
+        if cfg.ammo_resource_idx >= 0:
+            new_ammo = state.resources[avatar_type, 0, cfg.ammo_resource_idx] - cfg.ammo_cost
+            state = state.replace(
+                resources=jnp.where(
+                    is_shoot,
+                    state.resources.at[avatar_type, 0, cfg.ammo_resource_idx].set(new_ammo),
+                    state.resources))
+
     return state
 
 
@@ -660,12 +692,29 @@ def _maybe_shoot(state, action, cfg, avatar_type):
     if cfg.projectile_singleton:
         # Singleton: only spawn if no projectile of this type is alive
         is_shoot = is_shoot & ~jnp.any(state.alive[proj_type])
-    return jax.lax.cond(
+    # RC8: ammo check
+    if cfg.ammo_resource_idx >= 0:
+        ammo_count = state.resources[avatar_type, 0, cfg.ammo_resource_idx]
+        if cfg.min_ammo >= 0:
+            has_ammo = ammo_count > cfg.min_ammo
+        else:
+            has_ammo = ammo_count > 0
+        is_shoot = is_shoot & has_ammo
+    state = jax.lax.cond(
         is_shoot,
         lambda s: spawn_sprite(s, avatar_type, 0, proj_type, proj_ori, proj_speed),
         lambda s: s,
         state,
     )
+    # RC8: subtract ammo cost after shooting
+    if cfg.ammo_resource_idx >= 0:
+        new_ammo = state.resources[avatar_type, 0, cfg.ammo_resource_idx] - cfg.ammo_cost
+        state = state.replace(
+            resources=jnp.where(
+                is_shoot,
+                state.resources.at[avatar_type, 0, cfg.ammo_resource_idx].set(new_ammo),
+                state.resources))
+    return state
 
 
 def _update_aimed_avatar(state, action, cfg, height, width, block_size=1):
@@ -775,20 +824,25 @@ def _update_rotating_avatar(state, action, cfg, height, width, block_size=1):
 
 
 def _npc_spawn_point(state, type_idx, cfg, height, width, block_size):
+    state = _pre_spawn(state, type_idx)
     return update_spawn_point(
-        state, type_idx, cfg.cooldown, prob=cfg.prob, total=cfg.total,
+        state, type_idx, cfg.spawn_cooldown, prob=cfg.prob, total=cfg.total,
         target_type=cfg.target_type_idx,
         target_orientation=jnp.array(cfg.target_orientation, dtype=jnp.float32),
-        target_speed=cfg.target_speed)
+        target_speed=cfg.target_speed,
+        target_singleton=cfg.target_singleton)
 
 
 def _npc_bomber(state, type_idx, cfg, height, width, block_size):
     # GVGAI SpawnPoint.update(): spawn first, then super.update() does movement
+    # spawn_timers and cooldown_timers are independent (RC3)
+    state = _pre_spawn(state, type_idx)
     state = update_spawn_point(
         state, type_idx, cooldown=cfg.spawn_cooldown, prob=cfg.prob,
         total=cfg.total, target_type=cfg.target_type_idx,
         target_orientation=jnp.array(cfg.target_orientation, dtype=jnp.float32),
-        target_speed=cfg.target_speed)
+        target_speed=cfg.target_speed,
+        target_singleton=cfg.target_singleton)
     return update_missile(state, type_idx, cfg.cooldown)
 
 

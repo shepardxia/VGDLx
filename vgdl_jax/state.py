@@ -10,6 +10,7 @@ class GameState:
     orientations: jnp.ndarray    # [n_types, max_n, 2] float32
     speeds: jnp.ndarray          # [n_types, max_n] int32 (pixel displacement per tick)
     cooldown_timers: jnp.ndarray # [n_types, max_n] int32
+    spawn_timers: jnp.ndarray   # [n_types, max_n] int32 — separate from cooldown_timers for SpawnPoint/Bomber
     ages: jnp.ndarray            # [n_types, max_n] int32
     spawn_counts: jnp.ndarray    # [n_types, max_n] int32
     direction_ticks: jnp.ndarray # [n_types, max_n] int32 — remaining ticks to keep current direction
@@ -38,6 +39,7 @@ def create_initial_state(n_types, max_n, height, width,
         orientations=jnp.zeros((n_types, max_n, 2), dtype=jnp.float32),
         speeds=jnp.zeros((n_types, max_n), dtype=jnp.int32),  # pixel displacement per tick (set per-sprite by compiler)
         cooldown_timers=jnp.zeros((n_types, max_n), dtype=jnp.int32),
+        spawn_timers=jnp.zeros((n_types, max_n), dtype=jnp.int32),
         ages=jnp.zeros((n_types, max_n), dtype=jnp.int32),
         spawn_counts=jnp.zeros((n_types, max_n), dtype=jnp.int32),
         direction_ticks=jnp.zeros((n_types, max_n), dtype=jnp.int32),

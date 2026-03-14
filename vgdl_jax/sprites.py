@@ -278,22 +278,34 @@ def spawn_sprite(state: GameState, spawner_type, spawner_idx, target_type,
 
 
 def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
-                       target_type, target_orientation, target_speed):
+                       target_type, target_orientation, target_speed,
+                       target_singleton=False):
     """Conditionally spawn sprites — fully vectorized via prefix-sum slot allocation.
+
+    Uses spawn_timers (not cooldown_timers) for spawn readiness checks, so
+    spawning and movement timing are fully independent (RC3).
 
     Spawned sprites get cooldown_timers=0, is_first_tick=True. The reverse NPC
     loop in step.py gives them per-type preMovement (0→1) then update
     (isFirstTick blocks passiveMovement, clears flag) in the same tick.
+
+    If target_singleton=True, only spawns if no alive sprites of target_type
+    exist (matching GVGAI's singletons[typeInt] check in Game.addSprite).
     """
     rng, key = jax.random.split(state.rng)
     max_n = state.alive.shape[1]
 
-    # Vectorized spawn decision
+    # Vectorized spawn decision — uses spawn_timers, not cooldown_timers
     is_alive = state.alive[type_idx]
-    timer_ready = state.cooldown_timers[type_idx] == cooldown
+    timer_ready = state.spawn_timers[type_idx] == cooldown
     under_total = (total <= 0) | (state.spawn_counts[type_idx] < total)
     rand_ok = jax.random.uniform(key, (max_n,)) < prob
     should_spawn = is_alive & timer_ready & under_total & rand_ok
+
+    # RC7: singleton check — refuse to spawn if target type already has an alive sprite
+    if target_singleton:
+        target_has_none = ~jnp.any(state.alive[target_type])
+        should_spawn = should_spawn & target_has_none
 
     # Parallel slot allocation in target type
     should_fill, src_idx = prefix_sum_allocate(state.alive[target_type], should_spawn)
@@ -328,11 +340,11 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     state = state.replace(
         spawn_counts=state.spawn_counts.at[type_idx].set(new_counts))
 
-    # Reset cooldown timers for all spawners that attempted (timer_ready)
+    # Reset spawn_timers for all spawners that attempted (timer_ready)
     attempted = is_alive & timer_ready & under_total
-    new_timers = jnp.where(attempted, 0, state.cooldown_timers[type_idx])
+    new_timers = jnp.where(attempted, 0, state.spawn_timers[type_idx])
     state = state.replace(
-        cooldown_timers=state.cooldown_timers.at[type_idx].set(new_timers))
+        spawn_timers=state.spawn_timers.at[type_idx].set(new_timers))
 
     # Kill spawners that reached total
     total_reached = (total > 0) & (new_counts >= total)

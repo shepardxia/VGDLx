@@ -421,21 +421,31 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
             if len(slots) == 0:
                 continue
 
-            # Detect spawn outcome from target type alive count change
+            # Per-spawner spawn outcome detection via position matching.
+            # A spawner spawned iff a newly-alive target sprite appeared at
+            # that spawner's position (SpawnPoint creates at its own pos).
             target_ti = spawn_target_map.get(ti) if spawn_target_map else None
             if target_ti is not None:
-                pre_count = int(pre_alive[target_ti].sum())
-                post_count = int(post_alive[target_ti].sum())
-                spawned = post_count > pre_count
-                roll = 0.0 if spawned else 1.0
+                # Find newly alive target slots
+                newly_alive = post_alive[target_ti] & ~pre_alive[target_ti]
+                new_slots = np.where(newly_alive)[0]
+                new_target_pos = post_pos[target_ti][new_slots]  # [n_new, 2]
             else:
-                roll = 0.0  # no target info — default to spawn succeeds
+                new_target_pos = np.empty((0, 2), dtype=pre_pos.dtype)
 
             entries = []
             for slot in slots:
-                r, c = pre_pos[ti, slot, 0], pre_pos[ti, slot, 1]
+                spawner_pos = pre_pos[ti, slot]  # [2] pixel coords
+                # Check if any newly alive target matches this spawner's position
+                if len(new_target_pos) > 0:
+                    dists = (np.abs(new_target_pos[:, 0] - spawner_pos[0])
+                             + np.abs(new_target_pos[:, 1] - spawner_pos[1]))
+                    did_spawn = bool(np.any(dists < 2))
+                else:
+                    did_spawn = False
+                roll = 0.0 if did_spawn else 1.0
                 entries.append({
-                    "pos": [float(r), float(c)],  # already in pixels
+                    "pos": [float(spawner_pos[0]), float(spawner_pos[1])],
                     "roll": roll,
                 })
             record[sd.key] = entries

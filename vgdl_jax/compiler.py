@@ -167,7 +167,8 @@ def _select_collision_mode(a_static, b_static, speed_a_px, speed_b_px, block_siz
         return 'grid'
 
 
-def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()):
+def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=(),
+                          resource_name_to_idx=None):
     """Build AvatarConfig, n_actions, and n_move from the avatar SpriteDef."""
     sc_def = SPRITE_REGISTRY[avatar_sd.sprite_class]
     n_move = sc_def.n_move_actions
@@ -191,6 +192,15 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
                 proj_default_ori = list(proj_sd.orientation)
                 proj_ori_from_avatar = False
         shoot_action_idx = n_move + 1
+
+    # RC8: ammo resource lookup for FlakAvatar / AimedFlakAvatar
+    ammo_resource_idx = -1
+    min_ammo = -1
+    ammo_cost = 1
+    if avatar_sd.ammo and resource_name_to_idx:
+        ammo_resource_idx = resource_name_to_idx.get(avatar_sd.ammo, -1)
+        min_ammo = avatar_sd.min_ammo
+        ammo_cost = avatar_sd.ammo_cost
 
     avatar_config = AvatarConfig(
         avatar_type_indices=avatar_type_indices,
@@ -217,6 +227,9 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
         is_aimed=sc_def.is_aimed,
         can_move_aimed=sc_def.can_move_aimed,
         angle_diff=avatar_sd.angle_diff,
+        ammo_resource_idx=ammo_resource_idx,
+        min_ammo=min_ammo,
+        ammo_cost=ammo_cost,
     )
     return avatar_config, n_move
 
@@ -304,10 +317,11 @@ def _build_sprite_configs(game_def, block_size):
             cfg.target_type_idx = target_idx if target_idx >= 0 else 0
             cfg.prob = sd.spawner_prob
             cfg.total = sd.spawner_total
-            # Bomber spawn_cooldown defaults to the type's own cooldown
-            if sd.sprite_class == SpriteClass.BOMBER:
-                cfg.spawn_cooldown = cfg.cooldown
+            # Both SpawnPoint and Bomber use spawn_cooldown for spawn timing
+            cfg.spawn_cooldown = cfg.cooldown
+            # RC7: singleton check — refuse to spawn if target already alive
             if target_idx >= 0:
+                cfg.target_singleton = game_def.sprites[target_idx].singleton
                 target_sd = game_def.sprites[target_idx]
                 cfg.target_orientation = tuple(target_sd.orientation)
                 cfg.target_speed = speed_to_pixels(target_sd.speed, block_size, target_sd.physics_type)
@@ -504,13 +518,20 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
         speed_px = speed_to_pixels(sd.speed, block_size, sd.physics_type)
         cd = max(sd.cooldown, 1)
         sc_def = SPRITE_REGISTRY.get(sd.sprite_class)
-        # SpawnPoint/Bomber: cooldown_timers=cd-1 so they fire on tick 1
+        # SpawnPoint/Bomber: spawn_timers=cd-1 so they fire on tick 1
         # (GVGAI: (start+gameTick)%cd==0 fires tick 0)
-        # All other sprites: cooldown_timers=0
-        if sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
-            init_timer = cd - 1
+        # Movement uses cooldown_timers (GVGAI lastmove starts at 0)
+        # SpawnPoint: cooldown_timers=0 (doesn't move)
+        # Bomber: cooldown_timers=0 (lastmove starts at 0, separate from spawn)
+        if sd.sprite_class == SpriteClass.BOMBER:
+            init_timer = 0
+            init_spawn_timer = cd - 1
+        elif sd.sprite_class == SpriteClass.SPAWN_POINT:
+            init_timer = 0
+            init_spawn_timer = cd - 1
         else:
             init_timer = 0
+            init_spawn_timer = 0
         # Moving NPCs get is_first_tick=True (GVGAI isFirstTick blocks passiveMovement)
         init_first_tick = (sc_def is not None and sc_def.is_moving_npc)
         # RandomNPC cons initialization: GVGAI starts with prevAction=DNONE,
@@ -529,6 +550,8 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
             speeds=state.speeds.at[type_idx, slot].set(jnp.int32(speed_px)),
             cooldown_timers=state.cooldown_timers.at[type_idx, slot].set(
                 jnp.int32(init_timer)),
+            spawn_timers=state.spawn_timers.at[type_idx, slot].set(
+                jnp.int32(init_spawn_timer)),
             is_first_tick=state.is_first_tick.at[type_idx, slot].set(init_first_tick),
             direction_ticks=state.direction_ticks.at[type_idx, slot].set(
                 jnp.int32(init_dir_ticks)),
@@ -551,7 +574,8 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
     all_avatar_types = _find_all_avatar_types(game_def)
     avatar_config, n_move = _build_avatar_config(
         avatar_sd, game_def, block_size,
-        avatar_type_indices=all_avatar_types)
+        avatar_type_indices=all_avatar_types,
+        resource_name_to_idx=resource_name_to_idx)
 
     # Build GVGAI action map
     sc_def = SPRITE_REGISTRY[avatar_sd.sprite_class]
