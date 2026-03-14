@@ -40,7 +40,8 @@ def prefix_sum_allocate(alive_mask, source_mask):
     return should_fill, src_indices
 
 
-def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True):
+def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True,
+                        skip_mask=None):
     """Apply cooldown-gated movement. Uses orientations if deltas is None.
 
     Positions are int32 pixels. Speed is int32 pixel displacement per tick.
@@ -53,6 +54,10 @@ def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True):
     Args:
         passive: If True, is_first_tick blocks movement (missile-style).
                  If False, is_first_tick is only cleared, not blocking (chaser-style).
+        skip_mask: [max_n] bool — if True, skip movement AND cooldown reset for
+                   that sprite (e.g. DNONE direction in RandomNPC cons phase).
+                   In GVGAI, activeMovement() returns early when action==DNONE,
+                   so _updatePos() never runs and lastmove keeps incrementing.
 
     Returns:
         (new_pos, new_timers, can_move, first_tick_mask)
@@ -62,6 +67,8 @@ def _move_with_cooldown(state, type_idx, cooldown, deltas=None, passive=True):
     first_tick = state.is_first_tick[type_idx] & alive
     cooldown_ok = (state.cooldown_timers[type_idx] >= cooldown) & alive
     can_move = (~first_tick & cooldown_ok) if passive else cooldown_ok
+    if skip_mask is not None:
+        can_move = can_move & ~skip_mask
     if deltas is None:
         # Orientations are float32 direction vectors {-1,0,1} — truncate to int32
         deltas = state.orientations[type_idx].astype(jnp.int32)
@@ -138,8 +145,13 @@ def update_random_npc(state: GameState, type_idx, cooldown, cons=0):
     else:
         deltas = random_deltas
         new_ticks = None
+    # GVGAI: activeMovement() skips _updatePos() when action==DNONE,
+    # so lastmove keeps incrementing (cooldown NOT reset). This happens
+    # during the cons repeat phase when the initial orientation is zero.
+    is_dnone = (deltas[:, 0] == 0) & (deltas[:, 1] == 0)
     new_pos, new_timers, can_move, first_tick = _move_with_cooldown(
-        state, type_idx, cooldown, deltas=deltas, passive=False)
+        state, type_idx, cooldown, deltas=deltas, passive=False,
+        skip_mask=is_dnone)
     new_ori = jnp.where(can_move[:, None], deltas.astype(jnp.float32),
                         state.orientations[type_idx])
     state = _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng,

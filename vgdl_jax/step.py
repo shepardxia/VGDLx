@@ -318,7 +318,25 @@ def _collision_mask(state, type_a, type_b, height, width, block_size,
         effective = alive_a & in_bounds_a
         counts = counts.at[r, c].add(effective.astype(jnp.int32))
         mask = (counts[r, c] > 1) & effective
-        pidx = jnp.full(eff_a, -1, dtype=jnp.int32)
+
+        if need_partner:
+            # Build first_slot and last_slot grids for same-type partner lookup.
+            # For sprite at slot i, partner = last_slot[r,c] if last_slot != i,
+            # else first_slot[r,c]. This handles the common 2-sprites-per-cell case.
+            slot_indices = jnp.arange(eff_a, dtype=jnp.int32)
+            first_slot = jnp.full((height, width), eff_a, dtype=jnp.int32)  # sentinel = eff_a
+            last_slot = jnp.full((height, width), -1, dtype=jnp.int32)
+            eff_slots = jnp.where(effective, slot_indices, eff_a)
+            first_slot = first_slot.at[r, c].min(eff_slots)
+            last_slot = last_slot.at[r, c].max(jnp.where(effective, slot_indices, -1))
+            # For each sprite i: if last_slot != i, use last_slot; else use first_slot
+            my_last = last_slot[r, c]
+            my_first = first_slot[r, c]
+            pidx = jnp.where(mask,
+                             jnp.where(my_last != slot_indices, my_last, my_first),
+                             -1)
+        else:
+            pidx = jnp.full(eff_a, -1, dtype=jnp.int32)
 
     return (_pad_to_global(mask, eff_a, global_max_n),
             _pad_partner_to_global(pidx, eff_a, global_max_n))
@@ -473,12 +491,40 @@ def _collision_mask_static_b_grid(state, type_a, static_grid, height, width,
 
 def _collision_grid_mask_static_a(state, static_grid, type_b,
                                    height, width, block_size, max_b=None):
-    """Returns [H, W] bool grid of static cells overlapping any type_b sprite."""
+    """Returns [H, W] bool grid of static cells overlapping any type_b sprite.
+
+    For mid-cell sprites (speed_px % block_size != 0), the bounding box can span
+    a 2x2 cell region. We mark all 4 cells with pixel AABB verification, mirroring
+    the approach in _collision_mask_static_b_grid().
+    """
     _, _, eff_b = _resolve_slices(state, max_b=max_b)
-    r_b, c_b, effective_b = _prepare_type_b_cells(
-        state, type_b, eff_b, height, width, block_size)
+    pos_b = state.positions[type_b, :eff_b]  # [eff_b, 2] int32
+    alive_b = state.alive[type_b, :eff_b]
+    cell_b = pos_b // block_size
+    ib_b = in_bounds(cell_b, height, width)
+    effective_b = alive_b & ib_b
+
+    # 2x2 cell region that the block_size x block_size bounding box covers
+    min_r = pos_b[:, 0] // block_size
+    max_r = (pos_b[:, 0] + block_size - 1) // block_size
+    min_c = pos_b[:, 1] // block_size
+    max_c = (pos_b[:, 1] + block_size - 1) // block_size
+
     occ_b = jnp.zeros((height, width), dtype=jnp.bool_)
-    occ_b = occ_b.at[r_b, c_b].max(effective_b)
+
+    def mark_cell(gr, gc):
+        gr_c = jnp.clip(gr, 0, height - 1)
+        gc_c = jnp.clip(gc, 0, width - 1)
+        # Pixel AABB: static cell origin at (gr*block_size, gc*block_size)
+        row_diff = jnp.abs(pos_b[:, 0] - gr * block_size)
+        col_diff = jnp.abs(pos_b[:, 1] - gc * block_size)
+        valid = effective_b & (row_diff < block_size) & (col_diff < block_size)
+        return gr_c, gc_c, valid
+
+    for (gr, gc) in [(min_r, min_c), (min_r, max_c), (max_r, min_c), (max_r, max_c)]:
+        gr_c, gc_c, valid = mark_cell(gr, gc)
+        occ_b = occ_b.at[gr_c, gc_c].max(valid)
+
     return static_grid & occ_b
 
 
@@ -564,7 +610,7 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
                     need_partner=need_partner)
 
             # once-per-step guards
-            if effect_type in ('wall_stop', 'wall_bounce', 'partner_delta'):
+            if effect_type in ('wall_stop', 'wall_bounce'):
                 key = (effect_type, type_a)
                 already = once_guard.get(key, jnp.zeros(max_n, dtype=jnp.bool_))
                 coll_mask = coll_mask & ~already

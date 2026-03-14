@@ -354,10 +354,12 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
     for ed in game_def.effects:
         is_eos = (ed.actee_stype == 'EOS')
         actor_indices = game_def.resolve_stype(ed.actor_stype)
+        # GVGAI duplicates effects N times for repeat=N, enabling chain propagation
+        repeat = int(ed.kwargs.get('repeat', 1))
 
         if is_eos:
             for ta_idx in actor_indices:
-                compiled_effects.append(CompiledEffect(
+                ce = CompiledEffect(
                     type_a=ta_idx,
                     is_eos=True,
                     effect_type=ed.effect_type,
@@ -370,7 +372,9 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                         concrete_actee_idx=None,
                         resolve_first=_resolve_first,
                         block_size=block_size)),
-                ))
+                )
+                for _ in range(repeat):
+                    compiled_effects.append(ce)
         else:
             actee_indices = game_def.resolve_stype(ed.actee_stype)
             for ta_idx in actor_indices:
@@ -384,7 +388,7 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                         block_size=block_size)
                     # max_speed_cells: for sweep collision
                     max_speed_px = max(speed_a_px, speed_b_px, 1)
-                    compiled_effects.append(CompiledEffect(
+                    ce = CompiledEffect(
                         type_a=ta_idx,
                         type_b=tb_idx,
                         is_eos=False,
@@ -402,7 +406,9 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                             concrete_actee_idx=tb_idx,
                             resolve_first=_resolve_first,
                             block_size=block_size)),
-                    ))
+                    )
+                    for _ in range(repeat):
+                        compiled_effects.append(ce)
     return compiled_effects
 
 
