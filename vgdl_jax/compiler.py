@@ -203,11 +203,7 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
         ammo_cost = avatar_sd.ammo_cost
 
     # RC4: projectile_offset — ShootAvatar/ShootEverywhereAvatar spawn one cell ahead
-    _PROJECTILE_OFFSET_CLASSES = {
-        SpriteClass.SHOOT_AVATAR,
-        SpriteClass.SHOOT_EVERYWHERE_AVATAR,
-    }
-    projectile_offset = avatar_sd.sprite_class in _PROJECTILE_OFFSET_CLASSES
+    projectile_offset = sc_def.projectile_offset
 
     avatar_config = AvatarConfig(
         avatar_type_indices=avatar_type_indices,
@@ -538,15 +534,11 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
         # Movement uses cooldown_timers (GVGAI lastmove starts at 0)
         # SpawnPoint: cooldown_timers=0 (doesn't move)
         # Bomber: cooldown_timers=0 (lastmove starts at 0, separate from spawn)
-        if sd.sprite_class == SpriteClass.BOMBER:
-            init_timer = 0
-            init_spawn_timer = cd - 1
-        elif sd.sprite_class == SpriteClass.SPAWN_POINT:
-            init_timer = 0
+        if sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
             init_spawn_timer = cd - 1
         else:
-            init_timer = 0
             init_spawn_timer = 0
+        init_timer = 0
         # Moving NPCs get is_first_tick=True (GVGAI isFirstTick blocks passiveMovement)
         init_first_tick = (sc_def is not None and sc_def.is_moving_npc)
         # RandomNPC cons initialization: GVGAI starts with prevAction=DNONE,

@@ -103,6 +103,8 @@ class SpriteClassDef:
     is_aimed: bool = False
     can_move_aimed: bool = False
     gvgai_actions: tuple = ()       # GVGAI actionsNIL ordering as action name strings
+    rotate_in_place_default: bool = False  # OrientedAvatar subclasses default rotateInPlace=True
+    projectile_offset: bool = False        # ShootAvatar/ShootEverywhereAvatar spawn projectile one cell ahead
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +231,8 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         n_move_actions=4, can_shoot=True,
         is_oriented=True,
         gvgai_actions=('ACTION_USE', 'ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
+        rotate_in_place_default=True,
+        projectile_offset=True,
     ),
     SpriteClass.HORIZONTAL_AVATAR: SpriteClassDef(
         vgdl_names=('HorizontalAvatar',),
@@ -242,6 +246,7 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         n_move_actions=4,
         is_oriented=True,
         gvgai_actions=('ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
+        rotate_in_place_default=True,
     ),
     SpriteClass.VERTICAL_AVATAR: SpriteClassDef(
         vgdl_names=('VerticalAvatar',),
@@ -289,6 +294,8 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         n_move_actions=4, can_shoot=True, shoot_everywhere=True,
         is_oriented=True,
         gvgai_actions=('ACTION_USE', 'ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
+        rotate_in_place_default=True,
+        projectile_offset=True,
     ),
     SpriteClass.AIMED_AVATAR: SpriteClassDef(
         vgdl_names=('AimedAvatar',),

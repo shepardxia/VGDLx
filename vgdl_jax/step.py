@@ -633,6 +633,27 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
 # ── Avatar and NPC update ─────────────────────────────────────────────
 
 
+def _check_ammo(state, avatar_type, cfg):
+    """Return has_ammo bool. Always True if no ammo configured."""
+    if cfg.ammo_resource_idx < 0:
+        return True  # Python True, compiled out
+    ammo_count = state.resources[avatar_type, 0, cfg.ammo_resource_idx]
+    if cfg.min_ammo >= 0:
+        return ammo_count > cfg.min_ammo
+    return ammo_count > 0
+
+
+def _subtract_ammo(state, is_shoot, avatar_type, cfg):
+    """Subtract ammo_cost from resources when is_shoot is True."""
+    if cfg.ammo_resource_idx < 0:
+        return state  # compiled out
+    cur = state.resources[avatar_type, 0, cfg.ammo_resource_idx]
+    new_ammo = cur - cfg.ammo_cost
+    return state.replace(
+        resources=state.resources.at[avatar_type, 0, cfg.ammo_resource_idx].set(
+            jnp.where(is_shoot, new_ammo, cur)))
+
+
 def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_size=1):
     """Update a single avatar type's position and optionally shoot."""
     n_move = cfg.n_move_actions
@@ -691,29 +712,20 @@ def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_
             is_shoot = is_shoot & ~jnp.any(state.alive[proj_type])
 
         # RC8: ammo check — FlakAvatar/AimedFlakAvatar need ammo to shoot
-        if cfg.ammo_resource_idx >= 0:
-            ammo_count = state.resources[avatar_type, 0, cfg.ammo_resource_idx]
-            if cfg.min_ammo >= 0:
-                has_ammo = ammo_count > cfg.min_ammo
-            else:
-                has_ammo = ammo_count > 0
-            is_shoot = is_shoot & has_ammo
+        has_ammo = _check_ammo(state, avatar_type, cfg)
+        is_shoot = is_shoot & has_ammo
 
         if cfg.shoot_everywhere:
-            if cfg.projectile_offset:
-                def _shoot_everywhere(s):
-                    for i in range(4):
+            def _shoot_everywhere(s):
+                for i in range(4):
+                    if cfg.projectile_offset:
                         proj_pos = s.positions[avatar_type, 0] + DIRECTION_DELTAS[i] * block_size
-                        s = spawn_sprite(s, avatar_type, 0, proj_type,
-                                         DIRECTION_DELTAS_F32[i], proj_speed,
-                                         pos_override=proj_pos)
-                    return s
-            else:
-                def _shoot_everywhere(s):
-                    for i in range(4):
-                        s = spawn_sprite(s, avatar_type, 0, proj_type,
-                                         DIRECTION_DELTAS_F32[i], proj_speed)
-                    return s
+                    else:
+                        proj_pos = None
+                    s = spawn_sprite(s, avatar_type, 0, proj_type,
+                                     DIRECTION_DELTAS_F32[i], proj_speed,
+                                     pos_override=proj_pos)
+                return s
             state = jax.lax.cond(
                 is_shoot, _shoot_everywhere, lambda s: s, state)
         else:
@@ -723,35 +735,23 @@ def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_
                 proj_ori = jnp.array(cfg.projectile_default_orientation,
                                       dtype=jnp.float32)
 
+            # RC4: ShootAvatar spawns projectile one cell ahead
             if cfg.projectile_offset:
-                # RC4: ShootAvatar spawns projectile one cell ahead
                 proj_pos = state.positions[avatar_type, 0] + \
                     state.orientations[avatar_type, 0].astype(jnp.int32) * block_size
-                state = jax.lax.cond(
-                    is_shoot,
-                    lambda s: spawn_sprite(s, avatar_type, 0, proj_type,
-                                            proj_ori, proj_speed,
-                                            pos_override=proj_pos),
-                    lambda s: s,
-                    state,
-                )
             else:
-                state = jax.lax.cond(
-                    is_shoot,
-                    lambda s: spawn_sprite(s, avatar_type, 0, proj_type,
-                                            proj_ori, proj_speed),
-                    lambda s: s,
-                    state,
-                )
+                proj_pos = None
+            state = jax.lax.cond(
+                is_shoot,
+                lambda s: spawn_sprite(s, avatar_type, 0, proj_type,
+                                        proj_ori, proj_speed,
+                                        pos_override=proj_pos),
+                lambda s: s,
+                state,
+            )
 
         # RC8: subtract ammo cost after shooting
-        if cfg.ammo_resource_idx >= 0:
-            new_ammo = state.resources[avatar_type, 0, cfg.ammo_resource_idx] - cfg.ammo_cost
-            state = state.replace(
-                resources=jnp.where(
-                    is_shoot,
-                    state.resources.at[avatar_type, 0, cfg.ammo_resource_idx].set(new_ammo),
-                    state.resources))
+        state = _subtract_ammo(state, is_shoot, avatar_type, cfg)
 
     return state
 
@@ -774,13 +774,8 @@ def _maybe_shoot(state, action, cfg, avatar_type):
         # Singleton: only spawn if no projectile of this type is alive
         is_shoot = is_shoot & ~jnp.any(state.alive[proj_type])
     # RC8: ammo check
-    if cfg.ammo_resource_idx >= 0:
-        ammo_count = state.resources[avatar_type, 0, cfg.ammo_resource_idx]
-        if cfg.min_ammo >= 0:
-            has_ammo = ammo_count > cfg.min_ammo
-        else:
-            has_ammo = ammo_count > 0
-        is_shoot = is_shoot & has_ammo
+    has_ammo = _check_ammo(state, avatar_type, cfg)
+    is_shoot = is_shoot & has_ammo
     state = jax.lax.cond(
         is_shoot,
         lambda s: spawn_sprite(s, avatar_type, 0, proj_type, proj_ori, proj_speed),
@@ -788,13 +783,7 @@ def _maybe_shoot(state, action, cfg, avatar_type):
         state,
     )
     # RC8: subtract ammo cost after shooting
-    if cfg.ammo_resource_idx >= 0:
-        new_ammo = state.resources[avatar_type, 0, cfg.ammo_resource_idx] - cfg.ammo_cost
-        state = state.replace(
-            resources=jnp.where(
-                is_shoot,
-                state.resources.at[avatar_type, 0, cfg.ammo_resource_idx].set(new_ammo),
-                state.resources))
+    state = _subtract_ammo(state, is_shoot, avatar_type, cfg)
     return state
 
 
@@ -917,13 +906,7 @@ def _npc_spawn_point(state, type_idx, cfg, height, width, block_size):
 def _npc_bomber(state, type_idx, cfg, height, width, block_size):
     # GVGAI SpawnPoint.update(): spawn first, then super.update() does movement
     # spawn_timers and cooldown_timers are independent (RC3)
-    state = _pre_spawn(state, type_idx)
-    state = update_spawn_point(
-        state, type_idx, cooldown=cfg.spawn_cooldown, prob=cfg.prob,
-        total=cfg.total, target_type=cfg.target_type_idx,
-        target_orientation=jnp.array(cfg.target_orientation, dtype=jnp.float32),
-        target_speed=cfg.target_speed,
-        target_singleton=cfg.target_singleton)
+    state = _npc_spawn_point(state, type_idx, cfg, height, width, block_size)
     return update_missile(state, type_idx, cfg.cooldown)
 
 
