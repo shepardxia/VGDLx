@@ -297,7 +297,7 @@ def reverse_direction(state, type_a, mask, score_delta, **_):
 
 def turn_around(state, prev_positions, type_a, mask, score_delta,
                 height, width, block_size=1, **_):
-    # py-vgdl: restore position, move DOWN twice, reverse direction
+    # GVGAI: restore position, move DOWN twice, reverse direction
     state = prim_restore_pos(state, type_a, mask, prev_positions)
     pos = state.positions[type_a]
     # Displace by 2 cells = 2 * block_size pixels downward

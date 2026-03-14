@@ -2,10 +2,13 @@
 RNG replay infrastructure for cross-engine validation.
 
 Two components:
-1. RNGRecorder — eagerly replays vgdl-jax's RNG split sequence to produce a
+1. RNGRecorder — eagerly replays VGDLx's RNG split sequence to produce a
    per-step record of all random draws (direction indices, spawn rolls, etc.)
 2. ReplayRandomGenerator — drop-in replacement for py-vgdl's random.Random
    that returns pre-recorded values instead of generating new ones.
+
+For GVGAI validation, build_gvgai_rng_records() + write_gvgai_rng_file()
+produce a JSON file that GVGAI's TraceAgent reads to inject matching RNG.
 
 Together, these ensure both engines use identical random outcomes.
 """
@@ -72,8 +75,9 @@ class RNGRecorder:
         rng = rng_key
         record = {}
 
-        # Walk NPC update order (same as step.py lines 106-112)
-        for type_idx, cfg in enumerate(self.sprite_configs):
+        # Walk NPC update order in REVERSE (matching step.py's reverse loop)
+        for type_idx in range(len(self.sprite_configs) - 1, -1, -1):
+            cfg = self.sprite_configs[type_idx]
             sc = cfg['sprite_class']
             if sc in AVATAR_CLASSES or sc in STATIC_CLASSES:
                 continue
@@ -358,6 +362,12 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
     For spawn-consuming sprites (SpawnPoint, Bomber):
       Compare pre/post alive counts to determine spawn outcome.
 
+    For teleportToExit effects:
+      Detect position change to exit portal position, record exit coords.
+
+    For flipDirection effects:
+      Record post-step orientation of actor sprites.
+
     Args:
         pre_state: GameState before step
         post_state: GameState after step
@@ -366,8 +376,7 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
         spawn_target_map: optional dict {type_idx: target_type_idx} for spawn outcome detection
 
     Returns:
-        dict: {sprite_key: [{"pos": [py, px], "dir": int}, ...]}
-        dir is DBASEDIRS index (0-3) or -1 for DNONE.
+        dict: {sprite_key: [{"pos": [py, px], "dir"|"roll"|"flip_dir"|"teleport_exit": ...}, ...]}
     """
     from vgdl_jax.data_model import SPRITE_REGISTRY
 
@@ -376,6 +385,7 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
     # Bulk-convert JAX arrays to numpy once (avoids per-element device→host transfers)
     pre_alive = np.array(pre_state.alive)
     pre_pos = np.array(pre_state.positions)
+    post_pos = np.array(post_state.positions)
     post_ori = np.array(post_state.orientations)
     post_alive = np.array(post_state.alive)
 
@@ -429,6 +439,88 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
                     "roll": roll,
                 })
             record[sd.key] = entries
+
+    # --- Effect-level RNG: teleportToExit ---
+    # Detect teleport outcomes by comparing actor positions to exit portal positions.
+    # The recorded pos is the entrance portal position (= avatar's position when effect
+    # fires on the GVGAI side, after movement to the portal cell).
+    for ed in game_def.effects:
+        if ed.effect_type != 'teleport_to_exit':
+            continue
+        actor_indices = game_def.resolve_stype(ed.actor_stype)
+        entrance_indices = game_def.resolve_stype(ed.actee_stype)
+        if not entrance_indices:
+            continue
+        ent_ti = entrance_indices[0]
+        ent_sd = game_def.sprites[ent_ti]
+        if not ent_sd.portal_exit_stype:
+            continue
+        exit_indices = game_def.resolve_stype(ent_sd.portal_exit_stype)
+        if not exit_indices:
+            continue
+        exit_ti = exit_indices[0]
+
+        exit_alive_mask = pre_alive[exit_ti]
+        exit_slots = np.where(exit_alive_mask)[0]
+        ent_alive_mask = pre_alive[ent_ti]
+        ent_slots = np.where(ent_alive_mask)[0]
+
+        for actor_ti in actor_indices:
+            key = game_def.sprites[actor_ti].key
+            alive_mask = pre_alive[actor_ti]
+            for slot in np.where(alive_mask)[0]:
+                a_pre = pre_pos[actor_ti, slot]
+                a_post = post_pos[actor_ti, slot]
+                if np.array_equal(a_pre, a_post):
+                    continue  # no position change
+
+                # Check if post position matches an exit portal
+                matched_exit = None
+                for es in exit_slots:
+                    ep = pre_pos[exit_ti, es]
+                    if abs(int(a_post[0]) - int(ep[0])) + abs(int(a_post[1]) - int(ep[1])) < 2:
+                        matched_exit = ep
+                        break
+                if matched_exit is None:
+                    continue  # position change was movement, not teleport
+
+                # Find entrance portal closest to actor's pre-step position
+                best_ent = None
+                best_d = float('inf')
+                for es in ent_slots:
+                    ep = pre_pos[ent_ti, es]
+                    d = abs(int(a_pre[0]) - int(ep[0])) + abs(int(a_pre[1]) - int(ep[1]))
+                    if d < best_d:
+                        best_d = d
+                        best_ent = ep
+                if best_ent is not None and best_d <= block_size:
+                    record.setdefault(key, []).append({
+                        "pos": [float(best_ent[0]), float(best_ent[1])],
+                        "teleport_exit": [float(matched_exit[0]), float(matched_exit[1])],
+                    })
+
+    # --- Effect-level RNG: flipDirection ---
+    # Record post-step orientation for all alive actor sprites of flipDirection effects.
+    # Java side only consumes for sprites that actually collided (position-matched lookup).
+    for ed in game_def.effects:
+        if ed.effect_type != 'flip_direction':
+            continue
+        actor_indices = game_def.resolve_stype(ed.actor_stype)
+        for actor_ti in actor_indices:
+            key = game_def.sprites[actor_ti].key
+            alive_mask = pre_alive[actor_ti]
+            for slot in np.where(alive_mask)[0]:
+                ori_r, ori_c = post_ori[actor_ti, slot, 0], post_ori[actor_ti, slot, 1]
+                basedirs_idx = _ORI_TO_BASEDIRS.get(
+                    (round(float(ori_r)), round(float(ori_c))), -1)
+                if basedirs_idx < 0:
+                    continue
+                # Use post-state position (effects fire after movement)
+                pr, pc = post_pos[actor_ti, slot, 0], post_pos[actor_ti, slot, 1]
+                record.setdefault(key, []).append({
+                    "pos": [float(pr), float(pc)],
+                    "flip_dir": basedirs_idx,
+                })
 
     return record
 

@@ -193,7 +193,7 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
         shoot_action_idx = n_move + 1
 
     avatar_config = AvatarConfig(
-        avatar_type_idx=avatar_sd.type_idx,
+        avatar_type_indices=avatar_type_indices,
         n_move_actions=n_move,
         cooldown=max(avatar_sd.cooldown, 1),
         can_shoot=can_shoot,
@@ -202,6 +202,7 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
         projectile_orientation_from_avatar=proj_ori_from_avatar,
         projectile_default_orientation=tuple(proj_default_ori),
         projectile_speed=proj_speed,
+        projectile_singleton=(proj_type_idx >= 0 and game_def.sprites[proj_type_idx].singleton),
         direction_offset=direction_offset,
         physics_type=avatar_sd.physics_type,
         mass=avatar_sd.mass,
@@ -216,7 +217,6 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
         is_aimed=sc_def.is_aimed,
         can_move_aimed=sc_def.can_move_aimed,
         angle_diff=avatar_sd.angle_diff,
-        avatar_type_indices=avatar_type_indices,
     )
     return avatar_config, n_move
 

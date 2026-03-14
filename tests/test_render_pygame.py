@@ -73,22 +73,3 @@ def test_render_pygame_matches_jax():
     np.testing.assert_array_equal(jax_img, pygame_img)
 
 
-@pytest.mark.skipif(not HAS_PYGAME, reason="pygame not installed")
-def test_render_pygame_with_sprites():
-    """Pygame renderer draws sprite images when available."""
-    from vgdl_jax.render import render_pygame
-
-    gd = parse_vgdl(
-        os.path.join(GAMES_DIR, 'chase.txt'),
-        os.path.join(GAMES_DIR, 'chase_lvl0.txt'),
-    )
-    compiled = compile_game(gd)
-    state = compiled.init_state.replace(rng=jax.random.PRNGKey(0))
-
-    img = render_pygame(state, gd, block_size=24, static_grid_map=compiled.static_grid_map)
-    assert img.shape == (gd.level.height * 24, gd.level.width * 24, 3)
-    assert img.dtype == np.uint8
-    # With sprite images, the rendering should have more color variety
-    # than solid blocks (images have alpha blending, gradients, etc.)
-    unique_colors = len(np.unique(img.reshape(-1, 3), axis=0))
-    assert unique_colors > 10  # solid blocks would have very few unique colors

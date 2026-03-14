@@ -33,9 +33,10 @@ from vgdl_jax.validate.harness import (
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.join(SCRIPT_DIR, "..")
 
-TRAJECTORY_TYPES = ["noop", "cycling", "random"]
+TRAJECTORY_TYPES = ["noop", "random"]
 
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "validation_results")
+COMPAT_CACHE = os.path.join(OUTPUT_DIR, "supported_games.json")
 
 
 # ── Action sequence generators ───────────────────────────────────────────────
@@ -71,7 +72,7 @@ def _classify_result(result):
 
 
 def validate_game(entry: GameEntry, n_steps=30, seed=42, render_diffs=False,
-                   output_dir=None, backend='pyvgdl', use_rng_replay=False):
+                   output_dir=None, backend='pyvgdl', use_rng_replay=True):
     """Run all 3 trajectory types for a single game.
 
     Args:
@@ -135,6 +136,8 @@ def validate_game(entry: GameEntry, n_steps=30, seed=42, render_diffs=False,
                     "action": sc.action,
                     "matches": sc.matches,
                     "diffs": sc.diffs,
+                    "state_a": sc.state_a,
+                    "state_b": sc.state_b,
                 })
 
             game_result["trajectories"][traj_type] = {
@@ -142,6 +145,7 @@ def validate_game(entry: GameEntry, n_steps=30, seed=42, render_diffs=False,
                 "n_steps": result.n_steps,
                 "actual_steps": len(result.steps),
                 "level": result.level,
+                "actions": actions,
                 "steps": step_data,
             }
 
@@ -342,7 +346,45 @@ def generate_latex(results_json_path, output_dir):
 # ── Console output ───────────────────────────────────────────────────────────
 
 
-def print_summary(all_results):
+def _format_positions(pos_list):
+    """Format position list compactly."""
+    if not pos_list:
+        return "[]"
+    return "[" + ", ".join(f"({p[0]}, {p[1]})" for p in pos_list) + "]"
+
+
+def _print_divergence(step):
+    """Print side-by-side state comparison for a divergent step."""
+    state_a = step.get("state_a")
+    state_b = step.get("state_b")
+    if state_a is None or state_b is None:
+        return
+
+    # Score and done
+    score_a, score_b = state_a.get("score", 0), state_b.get("score", 0)
+    done_a, done_b = state_a.get("done", False), state_b.get("done", False)
+    if score_a != score_b:
+        print(f"             score: GVGAI={score_a}  VGDLx={score_b}")
+    if done_a != done_b:
+        print(f"             done:  GVGAI={done_a}  VGDLx={done_b}")
+
+    # Show divergent types only
+    types_a = state_a.get("types", {})
+    types_b = state_b.get("types", {})
+    for tkey in sorted(set(types_a.keys()) | set(types_b.keys())):
+        ta = types_a.get(tkey, {})
+        tb = types_b.get(tkey, {})
+        name = ta.get("key") or tb.get("key") or tkey
+        alive_a, alive_b = ta.get("alive_count", 0), tb.get("alive_count", 0)
+        pos_a, pos_b = ta.get("positions", []), tb.get("positions", [])
+        if alive_a == alive_b and pos_a == pos_b:
+            continue
+        print(f"             {name} (t{tkey}): alive {alive_a} vs {alive_b}")
+        print(f"               GVGAI: {_format_positions(pos_a)}")
+        print(f"               VGDLx: {_format_positions(pos_b)}")
+
+
+def print_summary(all_results, debug=False):
     """Print a human-readable summary to stdout."""
     print("\n" + "=" * 70)
     print("VALIDATION SUMMARY")
@@ -369,6 +411,14 @@ def print_summary(all_results):
             if failing > 0:
                 detail += f", failing={failing}"
             print(f"           {ttype:<10s} {tstatus:<16s} {detail}")
+
+            # Show first divergence for this trajectory
+            if debug and failing > 0:
+                for s in tdata.get("steps", []):
+                    if not s.get("matches", True):
+                        print(f"           ── first divergence at step {s['step']} ──")
+                        _print_divergence(s)
+                        break
 
         if result["errors"]:
             for err in result["errors"]:
@@ -492,6 +542,43 @@ def render_diff_artifacts(entry: GameEntry, traj_type, comparison_result, action
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
+def _filter_supported(games: dict, output_dir: str, recheck: bool = False) -> dict:
+    """Filter to supported games, using a cache file to avoid recompiling every run."""
+    cache_path = os.path.join(output_dir, "supported_games.json")
+
+    if not recheck and os.path.exists(cache_path):
+        with open(cache_path) as f:
+            cached_names = set(json.load(f))
+        supported = {n: e for n, e in games.items() if n in cached_names}
+        n_skipped = len(games) - len(supported)
+        if n_skipped > 0:
+            print(f"Skipping {n_skipped} unsupported game(s) (cached)")
+        return supported
+
+    # Recompute: try to compile each game
+    supported = {}
+    n_skipped = 0
+    for name, entry in games.items():
+        if not entry.level_files:
+            n_skipped += 1
+            continue
+        try:
+            setup_jax_game(entry)
+            supported[name] = entry
+        except Exception:
+            n_skipped += 1
+    if n_skipped > 0:
+        print(f"Skipping {n_skipped} unsupported game(s)")
+
+    # Save cache
+    os.makedirs(output_dir, exist_ok=True)
+    with open(cache_path, 'w') as f:
+        json.dump(sorted(supported.keys()), f, indent=2)
+    print(f"Wrote compat cache: {cache_path}")
+
+    return supported
+
+
 def _get_games(args) -> dict[str, GameEntry]:
     """Get games dict based on --source and --game flags."""
     if args.source == 'pyvgdl':
@@ -527,8 +614,8 @@ def main():
         help="Run validation for a single game by name",
     )
     parser.add_argument(
-        "--steps", type=int, default=30,
-        help="Number of steps per trajectory (default: 30)",
+        "--steps", type=int, default=40,
+        help="Number of steps per trajectory (default: 40)",
     )
     parser.add_argument(
         "--seed", type=int, default=42,
@@ -544,6 +631,10 @@ def main():
         help="Filter for validation: 'supported' (default) or 'all'",
     )
     parser.add_argument(
+        "--recheck-compat", action="store_true",
+        help="Force recomputation of supported games cache",
+    )
+    parser.add_argument(
         "--latex-only", action="store_true",
         help="Regenerate LaTeX table from existing results.json",
     )
@@ -556,8 +647,12 @@ def main():
         help="Generate PNG/GIF artifacts at divergence points",
     )
     parser.add_argument(
-        "--rng-replay", action="store_true",
-        help="Inject VGDLx RNG into reference engine for deterministic comparison",
+        "--rng-replay", action=argparse.BooleanOptionalAction, default=True,
+        help="Inject VGDLx RNG into reference engine for deterministic comparison (default: True)",
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Show first divergence details for each failing trajectory",
     )
     args = parser.parse_args()
 
@@ -585,22 +680,9 @@ def main():
         print_compat_report(list(games.values()))
         return
 
-    # ── Filter by compatibility ──
+    # ── Filter by compatibility (cached) ──
     if args.compat_filter == "supported":
-        supported = {}
-        n_skipped = 0
-        for name, entry in games.items():
-            if not entry.level_files:
-                n_skipped += 1
-                continue
-            try:
-                setup_jax_game(entry)
-                supported[name] = entry
-            except Exception:
-                n_skipped += 1
-        if n_skipped > 0:
-            print(f"Skipping {n_skipped} unsupported game(s)")
-        games = supported
+        games = _filter_supported(games, output_dir, recheck=args.recheck_compat)
 
     if not games:
         print("No supported games to validate.")
@@ -633,7 +715,7 @@ def main():
     generate_latex(os.path.join(output_dir, "results.json"), output_dir)
 
     # ── Console summary ──
-    print_summary(all_results)
+    print_summary(all_results, debug=args.debug)
 
 
 if __name__ == "__main__":

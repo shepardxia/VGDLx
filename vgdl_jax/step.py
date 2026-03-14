@@ -89,6 +89,19 @@ def _build_slot_grid(effective_b, eff_b, r_b, c_b, height, width):
     return slot_grid.at[r_b, c_b].set(slot_indices)
 
 
+def _pre_movement(state, type_idx):
+    """GVGAI VGDLSprite.preMovement(): increment lastmove (cooldown_timers) for alive sprites.
+
+    Called per-type, right before that type's update(), matching GVGAI's per-sprite
+    preMovement() → update() pattern.
+    """
+    return state.replace(
+        cooldown_timers=state.cooldown_timers.at[type_idx].set(
+            jnp.where(state.alive[type_idx],
+                      state.cooldown_timers[type_idx] + 1,
+                      state.cooldown_timers[type_idx])))
+
+
 def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                   chaser_target_set=frozenset(),
                   static_distance_fields=None,
@@ -140,24 +153,21 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
         # Save previous positions for stepBack / undoAll / bounceForward
         prev_positions = state.positions
 
-        # 1. Increment cooldown timers for alive sprites
-        state = state.replace(
-            cooldown_timers=jnp.where(
-                state.alive, state.cooldown_timers + 1,
-                state.cooldown_timers))
+        # 1. Avatar: preMovement then update (matching GVGAI tick() lines 1365-1371)
+        for at in avatar_config.avatar_type_indices:
+            state = _pre_movement(state, at)
 
-        # 2. Update avatar (dispatch based on compile-time physics_type)
         if avatar_config.physics_type == PHYSICS_CONTINUOUS:
             state = update_inertial_avatar(
                 state, action,
-                avatar_type=avatar_config.avatar_type_idx,
+                avatar_type=avatar_config.avatar_type_indices[0],
                 n_move=avatar_config.n_move_actions,
                 mass=avatar_config.mass,
                 strength=avatar_config.strength)
         elif avatar_config.physics_type == PHYSICS_GRAVITY:
             state = update_mario_avatar(
                 state, action,
-                avatar_type=avatar_config.avatar_type_idx,
+                avatar_type=avatar_config.avatar_type_indices[0],
                 mass=avatar_config.mass,
                 strength=avatar_config.strength,
                 jump_strength=avatar_config.jump_strength,
@@ -173,7 +183,10 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
             state = _update_avatar(state, action, avatar_config, height, width,
                                    block_size=block_size)
 
-        # 3. Update NPC sprites
+        # 2. NPC sprites: preMovement then update, in REVERSE order
+        # (matching GVGAI tick() lines 1377-1387: reverse spriteOrder ensures
+        # producers process before children, enabling same-tick processing)
+
         # Precompute distance fields — one per unique target, not per chaser type
         dist_fields = dict(_static_distance_fields)
         for target_idx in _dynamic_chaser_targets:
@@ -181,11 +194,13 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                 state.positions[target_idx], state.alive[target_idx],
                 height, width, block_size)
 
-        for type_idx, cfg in enumerate(sprite_configs):
+        for type_idx in range(len(sprite_configs) - 1, -1, -1):
+            cfg = sprite_configs[type_idx]
             if cfg.sprite_class in AVATAR_CLASSES:
                 continue
             if cfg.sprite_class in STATIC_CLASSES:
                 continue
+            state = _pre_movement(state, type_idx)
             if cfg.sprite_class in (SpriteClass.CHASER, SpriteClass.FLEEING):
                 state = update_chaser(
                     state, type_idx, cfg.target_type_idx, cfg.cooldown,
@@ -213,7 +228,7 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                                    height, width, max_n, block_size,
                                    cache_safe_type_b=_cache_safe_type_b)
 
-        # 6. Check terminations (increment step_count first, matching py-vgdl)
+        # 6. Check terminations (increment step_count first, matching GVGAI)
         state = state.replace(step_count=state.step_count + 1)
         state, done, win = check_all_terminations(state, terminations)
 
@@ -599,6 +614,8 @@ def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_
         is_shoot = (action == cfg.shoot_action_idx) & is_alive
         proj_type = cfg.projectile_type_idx
         proj_speed = cfg.projectile_speed
+        if cfg.projectile_singleton:
+            is_shoot = is_shoot & ~jnp.any(state.alive[proj_type])
 
         if cfg.shoot_everywhere:
             def _shoot_everywhere(s):
@@ -628,15 +645,10 @@ def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_
 
 def _update_avatar(state, action, cfg, height, width, block_size=1):
     """Update avatar position and optionally shoot."""
-    avatar_types = cfg.avatar_type_indices
-    if len(avatar_types) <= 1:
-        return _update_avatar_single(
-            state, action, cfg, cfg.avatar_type_idx, height, width, block_size)
-    else:
-        for at in avatar_types:
-            state = _update_avatar_single(
-                state, action, cfg, at, height, width, block_size)
-        return state
+    for at in cfg.avatar_type_indices:
+        state = _update_avatar_single(
+            state, action, cfg, at, height, width, block_size)
+    return state
 
 
 def _maybe_shoot(state, action, cfg, avatar_type):
@@ -645,6 +657,9 @@ def _maybe_shoot(state, action, cfg, avatar_type):
     proj_type = cfg.projectile_type_idx
     proj_speed = cfg.projectile_speed
     proj_ori = state.orientations[avatar_type, 0]
+    if cfg.projectile_singleton:
+        # Singleton: only spawn if no projectile of this type is alive
+        is_shoot = is_shoot & ~jnp.any(state.alive[proj_type])
     return jax.lax.cond(
         is_shoot,
         lambda s: spawn_sprite(s, avatar_type, 0, proj_type, proj_ori, proj_speed),
@@ -655,7 +670,7 @@ def _maybe_shoot(state, action, cfg, avatar_type):
 
 def _update_aimed_avatar(state, action, cfg, height, width, block_size=1):
     """Update AimedAvatar / AimedFlakAvatar."""
-    avatar_type = cfg.avatar_type_idx
+    avatar_type = cfg.avatar_type_indices[0]
     angle_diff = cfg.angle_diff
     can_move = cfg.can_move_aimed
     n_move = cfg.n_move_actions
@@ -697,7 +712,7 @@ def _update_aimed_avatar(state, action, cfg, height, width, block_size=1):
 
 def _update_rotating_avatar(state, action, cfg, height, width, block_size=1):
     """Update rotating avatar: ego-centric forward/backward + rotation."""
-    avatar_type = cfg.avatar_type_idx
+    avatar_type = cfg.avatar_type_indices[0]
     is_flipping = cfg.is_flipping
     noise_level = cfg.noise_level
 
@@ -768,12 +783,13 @@ def _npc_spawn_point(state, type_idx, cfg, height, width, block_size):
 
 
 def _npc_bomber(state, type_idx, cfg, height, width, block_size):
-    state = update_missile(state, type_idx, cfg.cooldown)
-    return update_spawn_point(
+    # GVGAI SpawnPoint.update(): spawn first, then super.update() does movement
+    state = update_spawn_point(
         state, type_idx, cooldown=cfg.spawn_cooldown, prob=cfg.prob,
         total=cfg.total, target_type=cfg.target_type_idx,
         target_orientation=jnp.array(cfg.target_orientation, dtype=jnp.float32),
         target_speed=cfg.target_speed)
+    return update_missile(state, type_idx, cfg.cooldown)
 
 
 _NPC_UPDATERS = {

@@ -1,8 +1,8 @@
 """
-State extraction from py-vgdl games for cross-engine validation.
+State extraction from game engines for cross-engine validation.
 
-Extracts a normalized state dict that can be compared against vgdl-jax.
-Handles coordinate conversion (py-vgdl pixel coords -> grid row,col)
+Extracts a normalized state dict for comparison across engines (GVGAI, py-vgdl, VGDLx).
+Handles coordinate conversion (pixel coords -> grid row,col)
 and sorts positions for order-independent comparison.
 """
 def extract_pyvgdl_state(game, sprite_key_order, block_size=10):

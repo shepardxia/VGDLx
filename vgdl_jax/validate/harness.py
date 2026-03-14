@@ -1,5 +1,5 @@
 """
-Validation harness: orchestrates cross-engine comparison between py-vgdl and vgdl-jax.
+Validation harness: orchestrates cross-engine comparison between GVGAI and VGDLx.
 
 All functions accept GameEntry objects for game identification (no string-based path construction).
 
@@ -27,7 +27,7 @@ if _PYVGDL_DIR not in sys.path:
 class StepComparison:
     step: int
     action: int
-    state_a: dict           # normalized state from engine A (py-vgdl)
+    state_a: dict           # normalized state from engine A (reference: GVGAI or py-vgdl)
     state_b: Optional[dict] # normalized state from engine B (vgdl-jax), None until ready
     matches: bool
     diffs: List[str]

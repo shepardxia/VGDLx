@@ -249,9 +249,10 @@ def spawn_sprite(state: GameState, spawner_type, spawner_idx, target_type,
                  orientation, speed):
     """Create a new sprite of target_type at the spawner's position.
 
-    Tick-spawned (SpawnPoint, Bomber, avatar shoot): is_first_tick=False,
-    cooldown_timers=0. In GVGAI, these sprites get processed in the same tick
-    due to reverse spriteOrder, consuming isFirstTick and incrementing lastmove.
+    Tick-spawned (SpawnPoint, Bomber, avatar shoot): cooldown_timers=0,
+    is_first_tick=True. The reverse NPC loop in step.py gives these sprites
+    per-type preMovement (0→1) then update (isFirstTick blocks passiveMovement,
+    clears flag) in the same tick — matching GVGAI's per-sprite processing.
     """
     pos = state.positions[spawner_type, spawner_idx]
     available = ~state.alive[target_type]
@@ -271,7 +272,7 @@ def spawn_sprite(state: GameState, spawner_type, spawner_idx, target_type,
         cooldown_timers=state.cooldown_timers.at[target_type, slot].set(
             jnp.where(has_slot, 0, state.cooldown_timers[target_type, slot])),
         is_first_tick=state.is_first_tick.at[target_type, slot].set(
-            jnp.where(has_slot, False, state.is_first_tick[target_type, slot])),
+            jnp.where(has_slot, True, state.is_first_tick[target_type, slot])),
     )
     return state
 
@@ -280,9 +281,9 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
                        target_type, target_orientation, target_speed):
     """Conditionally spawn sprites — fully vectorized via prefix-sum slot allocation.
 
-    Spawned sprites get is_first_tick=False and cooldown_timers=0: in GVGAI,
-    reverse spriteOrder means spawned types (lower index) are processed in the
-    same tick, consuming isFirstTick and incrementing lastmove.
+    Spawned sprites get cooldown_timers=0, is_first_tick=True. The reverse NPC
+    loop in step.py gives them per-type preMovement (0→1) then update
+    (isFirstTick blocks passiveMovement, clears flag) in the same tick.
     """
     rng, key = jax.random.split(state.rng)
     max_n = state.alive.shape[1]
@@ -315,7 +316,7 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
         cooldown_timers=state.cooldown_timers.at[target_type].set(
             jnp.where(should_fill, 0, state.cooldown_timers[target_type])),
         is_first_tick=state.is_first_tick.at[target_type].set(
-            jnp.where(should_fill, False, state.is_first_tick[target_type])),
+            jnp.where(should_fill, True, state.is_first_tick[target_type])),
         rng=rng,
     )
 

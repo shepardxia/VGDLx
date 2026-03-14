@@ -1,5 +1,5 @@
 """
-Standalone VGDL text parser — no py-vgdl/pygame dependency.
+Standalone VGDL text parser — no pygame dependency.
 Reads .txt game files and level files, produces a GameDef.
 """
 from collections import defaultdict
@@ -20,13 +20,13 @@ CLASS_MAP = {
     for name in d.vgdl_names
 }
 
-# Sprite classes that default to speed=1 in py-vgdl
+# Sprite classes that default to speed=1 (VGDL spec)
 SPEED_1_CLASSES = frozenset(
     sc for sc, d in SPRITE_REGISTRY.items() if d.default_speed > 0
 )
 
 
-# py-vgdl uses Vector2(x, y) with screen coords: UP=(0,-1), DOWN=(0,1)
+# VGDL convention: Vector2(x, y) with screen coords: UP=(0,-1), DOWN=(0,1)
 # Our JAX format uses (row, col): UP=(-1,0), DOWN=(1,0)
 ORIENTATION_MAP = {
     'UP': (-1.0, 0.0),
@@ -35,7 +35,7 @@ ORIENTATION_MAP = {
     'RIGHT': (0.0, 1.0),
 }
 
-# ── Color constants (matching py-vgdl ontology/constants.py) ─────────
+# ── Color constants (VGDL standard colors) ──────────────────────────
 
 COLOR_MAP = {
     'GREEN': (0, 200, 0),
@@ -58,7 +58,7 @@ COLOR_MAP = {
     'DARKBLUE': (20, 20, 100),
 }
 
-# Default color per py-vgdl class name (matches ontology class definitions)
+# Default color per sprite class name (matches ontology class definitions)
 DEFAULT_CLASS_COLORS = {
     'Immovable': (90, 90, 90),       # GRAY
     'Immutable': (90, 90, 90),       # GRAY
@@ -253,7 +253,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
         raise ValueError(f"Unknown sprite class '{class_name}'")
 
     # Extract known parameters with class-based defaults
-    # In py-vgdl: MovingAvatar, RandomNPC, Chaser, Fleeing, Missile, Walker, Bomber
+    # Moving sprite classes: MovingAvatar, RandomNPC, Chaser, Fleeing, Missile, Walker, Bomber
     # all default to speed=1
     default_speed = 1.0 if sc in SPEED_1_CLASSES else 0.0
     speed = args.get('speed', default_speed)
@@ -286,7 +286,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
     if not isinstance(spawner_stype, str):
         spawner_stype = None
 
-    # ErraticMissile and WalkJumper default to prob=0.1 in py-vgdl
+    # ErraticMissile and WalkJumper default to prob=0.1 (VGDL spec)
     default_prob = 0.1 if sc in (SpriteClass.ERRATIC_MISSILE, SpriteClass.WALK_JUMPER) else 1.0
     spawner_prob = float(args.get('prob', default_prob))
     spawner_total = int(args.get('total', 0))
@@ -306,7 +306,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
         img = None
 
     # Shrinkfactor: default 0.0 for all types.
-    # Note: py-vgdl's Avatar mixin sets shrinkfactor=0.15, but VGDLSprite
+    # Note: VGDL Avatar mixin sets shrinkfactor=0.15, but VGDLSprite
     # sets shrinkfactor=0.0 and wins via MRO (MovingAvatar -> VGDLSprite -> Avatar).
     # So the actual runtime default for avatars is 0.0, matching non-avatars.
     shrinkfactor = float(args.get('shrinkfactor', 0.0))
@@ -518,7 +518,7 @@ def parse_vgdl_text(game_text, level_text=None):
 
     raw_sprites = []
     raw_interactions = []
-    # Default mapping matching py-vgdl's BasicGame.__init__ (core.py:501)
+    # Default mapping matching GVGAI's VGDLFactory defaults
     raw_mappings = {'w': ['wall'], 'A': ['avatar']}
     raw_terminations = []
 

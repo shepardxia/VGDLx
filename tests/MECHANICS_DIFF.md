@@ -62,7 +62,7 @@ Not implemented in VGDLx:
 
 **Avatars**: NullAvatar, BirdAvatar, CarAvatar, LanderAvatar, MissileAvatar, OngoingAvatar, OngoingShootAvatar, OngoingTurningAvatar, PlatformerAvatar, SpaceshipAvatar, WizardAvatar
 
-## GVGAI Cross-Engine Validation (42 supported games, 10 steps)
+## GVGAI Cross-Engine Validation (42 supported games, 40 steps)
 
 **15 exact match**: bait, brainman, chainreaction, chipschallenge, clusters, cookmepasta, flower, modality, realsokoban, shipwreck, sokoban, superman, thecitadel, thesnowman, wrapsokoban
 

@@ -1,4 +1,4 @@
-"""Validation subpackage for cross-engine comparison between py-vgdl and vgdl-jax."""
+"""Validation subpackage for cross-engine comparison between GVGAI and VGDLx."""
 from .discovery import GameEntry, discover_games
 from .constants import PYVGDL_GAMES, GVGAI_GAMES, PYVGDL_GAMES_DIR, GVGAI_GAMES_DIR, BLOCK_SIZE
 from .harness import (setup_jax_game, setup_pyvgdl_game, run_comparison, run_gvgai_comparison,

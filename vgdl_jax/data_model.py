@@ -428,7 +428,7 @@ class CompiledEffect:
 
 @dataclass
 class AvatarConfig:
-    avatar_type_idx: int
+    avatar_type_indices: Tuple[int, ...]
     n_move_actions: int
     cooldown: int
     can_shoot: bool
@@ -437,6 +437,7 @@ class AvatarConfig:
     projectile_orientation_from_avatar: bool = False
     projectile_default_orientation: Tuple[float, float] = (0.0, 0.0)
     projectile_speed: float = 0.0
+    projectile_singleton: bool = False
     direction_offset: int = 0
     physics_type: str = PHYSICS_GRID
     mass: float = 1.0
@@ -451,9 +452,6 @@ class AvatarConfig:
     is_aimed: bool = False
     can_move_aimed: bool = False
     angle_diff: float = 0.05
-    # All avatar type indices (for games with multiple avatar subtypes like tercio).
-    # When set, avatar movement is applied to whichever subtype is alive.
-    avatar_type_indices: Tuple[int, ...] = ()
 
 
 @dataclass
