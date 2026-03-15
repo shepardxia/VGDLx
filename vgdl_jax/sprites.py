@@ -257,20 +257,14 @@ def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
                            first_tick_mask=first_tick)
 
 
-def spawn_sprite(state: GameState, spawner_type, spawner_idx, target_type,
-                 orientation, speed, pos_override=None):
-    """Create a new sprite of target_type at the spawner's position.
+def spawn_sprite(state: GameState, pos, target_type, orientation, speed):
+    """Create a new sprite of target_type at the given position.
 
     Tick-spawned (SpawnPoint, Bomber, avatar shoot): cooldown_timers=0,
     is_first_tick=True. The reverse NPC loop in step.py gives these sprites
     per-type preMovement (0→1) then update (isFirstTick blocks passiveMovement,
     clears flag) in the same tick — matching GVGAI's per-sprite processing.
-
-    Args:
-        pos_override: If provided, use this position instead of the spawner's.
-                      Used by RC4 (ShootAvatar spawns projectile one cell ahead).
     """
-    pos = pos_override if pos_override is not None else state.positions[spawner_type, spawner_idx]
     available = ~state.alive[target_type]
     slot = jnp.argmax(available)
     has_slot = available[slot]

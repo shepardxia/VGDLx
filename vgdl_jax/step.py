@@ -654,6 +654,68 @@ def _subtract_ammo(state, is_shoot, avatar_type, cfg):
             jnp.where(is_shoot, new_ammo, cur)))
 
 
+def _shoot(state, action, cfg, avatar_type, block_size=1):
+    """Handle all shooting logic for any avatar type.
+
+    1. Check if action is shoot action
+    2. Singleton check (if configured)
+    3. Ammo check
+    4. Compute projectile orientation (from avatar or default)
+    5. Compute projectile position (with offset if configured)
+    6. Spawn via spawn_sprite — handle both shoot_everywhere and single-shot
+    7. Subtract ammo
+
+    Returns updated state.
+    """
+    is_shoot = (action == cfg.shoot_action_idx) & state.alive[avatar_type, 0]
+    proj_type = cfg.projectile_type_idx
+    proj_speed = cfg.projectile_speed
+
+    if cfg.projectile_singleton:
+        is_shoot = is_shoot & ~jnp.any(state.alive[proj_type])
+
+    # RC8: ammo check
+    has_ammo = _check_ammo(state, avatar_type, cfg)
+    is_shoot = is_shoot & has_ammo
+
+    if cfg.shoot_everywhere:
+        def _shoot_everywhere(s):
+            for i in range(4):
+                if cfg.projectile_offset:
+                    proj_pos = s.positions[avatar_type, 0] + DIRECTION_DELTAS[i] * block_size
+                else:
+                    proj_pos = s.positions[avatar_type, 0]
+                s = spawn_sprite(s, proj_pos, proj_type,
+                                 DIRECTION_DELTAS_F32[i], proj_speed)
+            return s
+        state = jax.lax.cond(
+            is_shoot, _shoot_everywhere, lambda s: s, state)
+    else:
+        if cfg.projectile_orientation_from_avatar:
+            proj_ori = state.orientations[avatar_type, 0]
+        else:
+            proj_ori = jnp.array(cfg.projectile_default_orientation,
+                                  dtype=jnp.float32)
+
+        # RC4: ShootAvatar spawns projectile one cell ahead
+        if cfg.projectile_offset:
+            proj_pos = state.positions[avatar_type, 0] + \
+                state.orientations[avatar_type, 0].astype(jnp.int32) * block_size
+        else:
+            proj_pos = state.positions[avatar_type, 0]
+        state = jax.lax.cond(
+            is_shoot,
+            lambda s: spawn_sprite(s, proj_pos, proj_type,
+                                    proj_ori, proj_speed),
+            lambda s: s,
+            state,
+        )
+
+    # RC8: subtract ammo cost after shooting
+    state = _subtract_ammo(state, is_shoot, avatar_type, cfg)
+    return state
+
+
 def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_size=1):
     """Update a single avatar type's position and optionally shoot."""
     n_move = cfg.n_move_actions
@@ -705,53 +767,7 @@ def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_
 
     # Shoot
     if cfg.can_shoot:
-        is_shoot = (action == cfg.shoot_action_idx) & is_alive
-        proj_type = cfg.projectile_type_idx
-        proj_speed = cfg.projectile_speed
-        if cfg.projectile_singleton:
-            is_shoot = is_shoot & ~jnp.any(state.alive[proj_type])
-
-        # RC8: ammo check — FlakAvatar/AimedFlakAvatar need ammo to shoot
-        has_ammo = _check_ammo(state, avatar_type, cfg)
-        is_shoot = is_shoot & has_ammo
-
-        if cfg.shoot_everywhere:
-            def _shoot_everywhere(s):
-                for i in range(4):
-                    if cfg.projectile_offset:
-                        proj_pos = s.positions[avatar_type, 0] + DIRECTION_DELTAS[i] * block_size
-                    else:
-                        proj_pos = None
-                    s = spawn_sprite(s, avatar_type, 0, proj_type,
-                                     DIRECTION_DELTAS_F32[i], proj_speed,
-                                     pos_override=proj_pos)
-                return s
-            state = jax.lax.cond(
-                is_shoot, _shoot_everywhere, lambda s: s, state)
-        else:
-            if cfg.projectile_orientation_from_avatar:
-                proj_ori = state.orientations[avatar_type, 0]
-            else:
-                proj_ori = jnp.array(cfg.projectile_default_orientation,
-                                      dtype=jnp.float32)
-
-            # RC4: ShootAvatar spawns projectile one cell ahead
-            if cfg.projectile_offset:
-                proj_pos = state.positions[avatar_type, 0] + \
-                    state.orientations[avatar_type, 0].astype(jnp.int32) * block_size
-            else:
-                proj_pos = None
-            state = jax.lax.cond(
-                is_shoot,
-                lambda s: spawn_sprite(s, avatar_type, 0, proj_type,
-                                        proj_ori, proj_speed,
-                                        pos_override=proj_pos),
-                lambda s: s,
-                state,
-            )
-
-        # RC8: subtract ammo cost after shooting
-        state = _subtract_ammo(state, is_shoot, avatar_type, cfg)
+        state = _shoot(state, action, cfg, avatar_type, block_size)
 
     return state
 
@@ -761,29 +777,6 @@ def _update_avatar(state, action, cfg, height, width, block_size=1):
     for at in cfg.avatar_type_indices:
         state = _update_avatar_single(
             state, action, cfg, at, height, width, block_size)
-    return state
-
-
-def _maybe_shoot(state, action, cfg, avatar_type):
-    """Conditionally spawn projectile using avatar's current orientation."""
-    is_shoot = (action == cfg.shoot_action_idx)
-    proj_type = cfg.projectile_type_idx
-    proj_speed = cfg.projectile_speed
-    proj_ori = state.orientations[avatar_type, 0]
-    if cfg.projectile_singleton:
-        # Singleton: only spawn if no projectile of this type is alive
-        is_shoot = is_shoot & ~jnp.any(state.alive[proj_type])
-    # RC8: ammo check
-    has_ammo = _check_ammo(state, avatar_type, cfg)
-    is_shoot = is_shoot & has_ammo
-    state = jax.lax.cond(
-        is_shoot,
-        lambda s: spawn_sprite(s, avatar_type, 0, proj_type, proj_ori, proj_speed),
-        lambda s: s,
-        state,
-    )
-    # RC8: subtract ammo cost after shooting
-    state = _subtract_ammo(state, is_shoot, avatar_type, cfg)
     return state
 
 
@@ -824,7 +817,7 @@ def _update_aimed_avatar(state, action, cfg, height, width, block_size=1):
     )
 
     if cfg.can_shoot:
-        state = _maybe_shoot(state, action, cfg, avatar_type)
+        state = _shoot(state, action, cfg, avatar_type, block_size)
 
     return state
 
@@ -888,7 +881,7 @@ def _update_rotating_avatar(state, action, cfg, height, width, block_size=1):
     )
 
     if cfg.can_shoot:
-        state = _maybe_shoot(state, action, cfg, avatar_type)
+        state = _shoot(state, action, cfg, avatar_type, block_size)
 
     return state
 
