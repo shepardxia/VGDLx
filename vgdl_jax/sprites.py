@@ -371,8 +371,16 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     return state
 
 
-def update_spreader(state: GameState, type_idx, spreadprob, block_size=1):
-    """Spreader: at age==2, replicate to 4 adjacent cells with probability `spreadprob` each.
+def update_spreader(state: GameState, type_idx, spreadprob, target_type=-1, block_size=1):
+    """Spreader: at age==2, spread to 4 adjacent cells with probability `spreadprob` each.
+
+    GVGAI: `int newType = (itype == -1) ? this.getType() : itype;`
+    When target_type >= 0, spawn into that type's slots; otherwise into self.
+
+    GVGAI timing: Flicker.update() increments age INSIDE the NPC loop, then
+    Spreader checks `if(age==2)` after the increment. VGDLx increments ages
+    AFTER the NPC loop (step 4). So we check `ages + 1 == 2` (i.e., ages == 1)
+    to match the post-increment check that GVGAI performs.
 
     Neighbor positions are one cell away = block_size pixels in each direction.
     """
@@ -381,7 +389,9 @@ def update_spreader(state: GameState, type_idx, spreadprob, block_size=1):
 
     is_alive = state.alive[type_idx]
     ages = state.ages[type_idx]
-    should_spread = is_alive & (ages == 2)
+    # GVGAI: Flicker.update() does age++ then Spreader checks age==2.
+    # VGDLx defers age++, so check ages+1==2 (i.e., ages==1).
+    should_spread = is_alive & (ages == 1)
 
     # Random gate per sprite per direction
     rng, key_rand = jax.random.split(rng)
@@ -396,17 +406,24 @@ def update_spreader(state: GameState, type_idx, spreadprob, block_size=1):
     flat_mask = spawn_mask.reshape(-1)
     flat_pos = neighbor_pos.reshape(-1, 2)
 
-    should_fill, src_idx = prefix_sum_allocate(state.alive[type_idx], flat_mask)
+    # Determine target type: use stype if resolved, else self
+    tgt = target_type if target_type >= 0 else type_idx
+
+    should_fill, src_idx = prefix_sum_allocate(state.alive[tgt], flat_mask)
     src_pos = flat_pos[src_idx]
 
     state = state.replace(
-        alive=state.alive.at[type_idx].set(
-            state.alive[type_idx] | should_fill),
-        positions=state.positions.at[type_idx].set(
+        alive=state.alive.at[tgt].set(
+            state.alive[tgt] | should_fill),
+        positions=state.positions.at[tgt].set(
             jnp.where(should_fill[:, None], src_pos,
-                      state.positions[type_idx])),
-        ages=state.ages.at[type_idx].set(
-            jnp.where(should_fill, 0, state.ages[type_idx])),
+                      state.positions[tgt])),
+        ages=state.ages.at[tgt].set(
+            jnp.where(should_fill, 0, state.ages[tgt])),
+        cooldown_timers=state.cooldown_timers.at[tgt].set(
+            jnp.where(should_fill, 0, state.cooldown_timers[tgt])),
+        is_first_tick=state.is_first_tick.at[tgt].set(
+            jnp.where(should_fill, True, state.is_first_tick[tgt])),
         rng=rng,
     )
     return state

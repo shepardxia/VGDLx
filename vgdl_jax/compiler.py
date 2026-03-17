@@ -307,6 +307,7 @@ def _build_sprite_configs(game_def, block_size):
             cfg.target_type_idx = _resolve_first(game_def, sd.spawner_stype, 0)
         elif sd.sprite_class == SpriteClass.SPREADER:
             cfg.spreadprob = sd.spawner_prob
+            cfg.target_type_idx = _resolve_first(game_def, sd.spawner_stype, -1)
         elif sd.sprite_class == SpriteClass.ERRATIC_MISSILE:
             cfg.prob = sd.spawner_prob
         elif sd.sprite_class == SpriteClass.RANDOM_INERTIAL:

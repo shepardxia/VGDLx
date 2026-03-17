@@ -297,11 +297,16 @@ def reverse_direction(state, type_a, mask, score_delta, **_):
 
 def turn_around(state, prev_positions, type_a, mask, score_delta,
                 height, width, block_size=1, **_):
-    # GVGAI: restore position, move DOWN twice, reverse direction
+    # GVGAI: restore position, move DOWN twice at sprite's speed, reverse direction.
+    # activeMovement(sprite, DDOWN, sprite.speed) calls
+    #   _updatePos(DDOWN, (int)(speed * gridsize.width))
+    # which is state.speeds (int32 pixel displacement per tick).
     state = prim_restore_pos(state, type_a, mask, prev_positions)
     pos = state.positions[type_a]
-    # Displace by 2 cells = 2 * block_size pixels downward
-    displaced = pos + mask[:, None].astype(jnp.int32) * jnp.array([2 * block_size, 0], dtype=jnp.int32)
+    speed_px = state.speeds[type_a]  # [max_n] int32
+    # 2 * speed_px downward (row += 2*speed, col unchanged)
+    displacement = jnp.stack([2 * speed_px, jnp.zeros_like(speed_px)], axis=-1)
+    displaced = pos + mask[:, None].astype(jnp.int32) * displacement
     h_px = height * block_size - 1
     w_px = width * block_size - 1
     displaced = jnp.stack([
@@ -974,12 +979,22 @@ def _static_kill_if_other_resource(state, sg_idx, type_b, grid_mask,
     r_idx = kwargs.get('resource_idx', 0)
     limit = kwargs.get('limit', 0)
     if type_b >= 0:
-        cell_b = state.positions[type_b] // block_size
-        r_b = jnp.clip(cell_b[:, 0], 0, height - 1)
-        c_b = jnp.clip(cell_b[:, 1], 0, width - 1)
-        ib_b = in_bounds(cell_b, height, width)
+        pos_b = state.positions[type_b]
+        ib_b = in_bounds(pos_b // block_size, height, width)
         b_matches = compare_fn(state.resources[type_b, :, r_idx], limit) & state.alive[type_b] & ib_b
-        res_grid = jnp.zeros((height, width), dtype=jnp.bool_).at[r_b, c_b].max(b_matches)
+        # Build resource grid covering full bounding box (2x2 region), with pixel AABB.
+        min_r = pos_b[:, 0] // block_size
+        max_r = (pos_b[:, 0] + block_size - 1) // block_size
+        min_c = pos_b[:, 1] // block_size
+        max_c = (pos_b[:, 1] + block_size - 1) // block_size
+        res_grid = jnp.zeros((height, width), dtype=jnp.bool_)
+        for (gr, gc) in [(min_r, min_c), (min_r, max_c), (max_r, min_c), (max_r, max_c)]:
+            gr_c = jnp.clip(gr, 0, height - 1)
+            gc_c = jnp.clip(gc, 0, width - 1)
+            row_diff = jnp.abs(pos_b[:, 0] - gr * block_size)
+            col_diff = jnp.abs(pos_b[:, 1] - gc * block_size)
+            valid = b_matches & (row_diff < block_size) & (col_diff < block_size)
+            res_grid = res_grid.at[gr_c, gc_c].max(valid)
         kill_mask = grid_mask & res_grid
     else:
         kill_mask = jnp.zeros_like(grid_mask)
@@ -998,11 +1013,24 @@ def _static_kill_both(state, sg_idx, type_b, grid_mask, score_change, kwargs,
     n_killed = grid_mask.sum()
     state = prim_clear_static(state, sg_idx, grid_mask)
     if type_b >= 0:
-        cell_b = state.positions[type_b] // block_size
-        r_b = jnp.clip(cell_b[:, 0], 0, height - 1)
-        c_b = jnp.clip(cell_b[:, 1], 0, width - 1)
-        ib_b = in_bounds(cell_b, height, width)
-        mask_b = grid_mask[r_b, c_b] & state.alive[type_b] & ib_b
+        pos_b = state.positions[type_b]
+        alive_b = state.alive[type_b]
+        ib_b = in_bounds(pos_b // block_size, height, width)
+        effective_b = alive_b & ib_b
+        # Check all cells covered by the sprite's bounding box (2x2 region),
+        # with pixel AABB verification — same pattern as _collision_grid_mask_static_a.
+        min_r = pos_b[:, 0] // block_size
+        max_r = (pos_b[:, 0] + block_size - 1) // block_size
+        min_c = pos_b[:, 1] // block_size
+        max_c = (pos_b[:, 1] + block_size - 1) // block_size
+        mask_b = jnp.zeros_like(alive_b)
+        for (gr, gc) in [(min_r, min_c), (min_r, max_c), (max_r, min_c), (max_r, max_c)]:
+            gr_c = jnp.clip(gr, 0, height - 1)
+            gc_c = jnp.clip(gc, 0, width - 1)
+            row_diff = jnp.abs(pos_b[:, 0] - gr * block_size)
+            col_diff = jnp.abs(pos_b[:, 1] - gc * block_size)
+            valid = effective_b & (row_diff < block_size) & (col_diff < block_size)
+            mask_b = mask_b | (grid_mask[gr_c, gc_c] & valid)
         state = prim_kill(state, type_b, mask_b)
     return _with_score(state, n_killed * jnp.int32(score_change))
 

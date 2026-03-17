@@ -924,7 +924,7 @@ _NPC_UPDATERS = {
     SpriteClass.SPAWN_POINT: _npc_spawn_point,
     SpriteClass.BOMBER: _npc_bomber,
     SpriteClass.WALKER: lambda s, ti, cfg, h, w, bs: update_missile(s, ti, cfg.cooldown),
-    SpriteClass.SPREADER: lambda s, ti, cfg, h, w, bs: update_spreader(s, ti, spreadprob=cfg.spreadprob, block_size=bs),
+    SpriteClass.SPREADER: lambda s, ti, cfg, h, w, bs: update_spreader(s, ti, spreadprob=cfg.spreadprob, target_type=cfg.target_type_idx, block_size=bs),
     SpriteClass.RANDOM_INERTIAL: lambda s, ti, cfg, h, w, bs: update_random_inertial(s, ti, mass=cfg.mass, strength=cfg.strength),
     SpriteClass.RANDOM_MISSILE: lambda s, ti, cfg, h, w, bs: update_missile(s, ti, cfg.cooldown),
     SpriteClass.WALK_JUMPER: lambda s, ti, cfg, h, w, bs: update_walk_jumper(s, ti, prob=cfg.prob, strength=cfg.strength, gravity=cfg.gravity, mass=cfg.mass),
