@@ -263,19 +263,12 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
 
     cooldown = int(args.get('cooldown', 0))
 
-    # Orientation
-    ori_val = args.get('orientation', None)
-    if isinstance(ori_val, str) and ori_val in ORIENTATION_MAP:
-        orientation = ORIENTATION_MAP[ori_val]
-    else:
-        orientation = (0.0, 1.0)  # default RIGHT in (row, col)
+    def _parse_ori(key, default):
+        v = args.get(key, None)
+        return ORIENTATION_MAP[v] if isinstance(v, str) and v in ORIENTATION_MAP else default
 
-    # SpawnPoint/Bomber: spawnorientation overrides orientation of spawned sprites
-    spawn_ori_val = args.get('spawnorientation', None)
-    if isinstance(spawn_ori_val, str) and spawn_ori_val in ORIENTATION_MAP:
-        spawn_orientation = ORIENTATION_MAP[spawn_ori_val]
-    else:
-        spawn_orientation = (0.0, 0.0)  # (0,0) = not set, use target's default
+    orientation = _parse_ori('orientation', (0.0, 1.0))        # default RIGHT
+    spawn_orientation = _parse_ori('spawnorientation', (0.0, 0.0))  # (0,0) = not set
 
     is_static = sc in STATIC_CLASSES
 
