@@ -328,7 +328,11 @@ def _build_sprite_configs(game_def, block_size):
             if target_idx >= 0:
                 cfg.target_singleton = game_def.sprites[target_idx].singleton
                 target_sd = game_def.sprites[target_idx]
-                cfg.target_orientation = tuple(target_sd.orientation)
+                # spawnorientation overrides target's default orientation
+                if sd.spawn_orientation != (0.0, 0.0):
+                    cfg.target_orientation = tuple(sd.spawn_orientation)
+                else:
+                    cfg.target_orientation = tuple(target_sd.orientation)
                 cfg.target_speed = speed_to_pixels(target_sd.speed, block_size, target_sd.physics_type)
             else:
                 cfg.target_orientation = (0., 0.)
@@ -348,13 +352,19 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
 
     compiled_effects = []
     for ed in game_def.effects:
-        is_eos = (ed.actee_stype == 'EOS')
-        actor_indices = game_def.resolve_stype(ed.actor_stype)
+        is_eos = (ed.actee_stype == 'EOS') or (ed.actor_stype == 'EOS')
         # GVGAI duplicates effects N times for repeat=N, enabling chain propagation
         repeat = int(ed.kwargs.get('repeat', 1))
 
         if is_eos:
-            for ta_idx in actor_indices:
+            # EOS can appear as either actor or actee:
+            #   sprite EOS > effect  (actee is EOS, sprites from actor_stype)
+            #   EOS sprite > effect  (actor is EOS, sprites from actee_stype)
+            if ed.actor_stype == 'EOS':
+                eos_sprite_indices = game_def.resolve_stype(ed.actee_stype)
+            else:
+                eos_sprite_indices = game_def.resolve_stype(ed.actor_stype)
+            for ta_idx in eos_sprite_indices:
                 ce = CompiledEffect(
                     type_a=ta_idx,
                     is_eos=True,
@@ -372,6 +382,7 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                 for _ in range(repeat):
                     compiled_effects.append(ce)
         else:
+            actor_indices = game_def.resolve_stype(ed.actor_stype)
             actee_indices = game_def.resolve_stype(ed.actee_stype)
             for ta_idx in actor_indices:
                 for tb_idx in actee_indices:
@@ -529,13 +540,14 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
         speed_px = speed_to_pixels(sd.speed, block_size, sd.physics_type)
         cd = max(sd.cooldown, 1)
         sc_def = SPRITE_REGISTRY.get(sd.sprite_class)
-        # SpawnPoint/Bomber: spawn_timers=cd-1 so they fire on tick 1
-        # (GVGAI: (start+gameTick)%cd==0 fires tick 0)
+        # SpawnPoint/Bomber: spawn_timers=cd so first _pre_spawn increments
+        # to cd+1 >= cd, firing at tick 0 (matching GVGAI: gameTick starts at -1,
+        # first ++ gives 0, and (start+0)%cd==0 fires immediately).
         # Movement uses cooldown_timers (GVGAI lastmove starts at 0)
         # SpawnPoint: cooldown_timers=0 (doesn't move)
         # Bomber: cooldown_timers=0 (lastmove starts at 0, separate from spawn)
         if sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
-            init_spawn_timer = cd - 1
+            init_spawn_timer = cd
         else:
             init_spawn_timer = 0
         init_timer = 0

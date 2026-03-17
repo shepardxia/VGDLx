@@ -307,7 +307,7 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
 
     # Vectorized spawn decision — uses spawn_timers, not cooldown_timers
     is_alive = state.alive[type_idx]
-    timer_ready = state.spawn_timers[type_idx] == cooldown
+    timer_ready = state.spawn_timers[type_idx] >= cooldown
     under_total = (total <= 0) | (state.spawn_counts[type_idx] < total)
     rand_ok = jax.random.uniform(key, (max_n,)) < prob
     should_spawn = is_alive & timer_ready & under_total & rand_ok

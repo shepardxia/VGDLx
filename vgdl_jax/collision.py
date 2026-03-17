@@ -13,6 +13,12 @@ def in_bounds(cell_pos, height, width):
 def detect_eos(positions, alive, height, width, block_size):
     """Returns [max_n] bool — which alive sprites are out of bounds.
 
+    GVGAI checks the full sprite rectangle (not just top-left pixel):
+      rect.x < 0, rect.y < 0, rect.x + rect.width > screenWidth,
+      rect.y + rect.height > screenHeight.
+    Since sprites are block_size x block_size, this means:
+      pos < 0 (top-left) or pos + block_size > screen_size (bottom-right).
+
     Args:
         positions: [max_n, 2] int32 pixel coordinates
         height, width: grid dimensions in cells
@@ -20,6 +26,6 @@ def detect_eos(positions, alive, height, width, block_size):
     """
     h_px = height * block_size
     w_px = width * block_size
-    oob = ((positions[:, 0] < 0) | (positions[:, 0] >= h_px) |
-           (positions[:, 1] < 0) | (positions[:, 1] >= w_px))
+    oob = ((positions[:, 0] < 0) | (positions[:, 0] + block_size > h_px) |
+           (positions[:, 1] < 0) | (positions[:, 1] + block_size > w_px))
     return oob & alive

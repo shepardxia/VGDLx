@@ -270,6 +270,13 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
     else:
         orientation = (0.0, 1.0)  # default RIGHT in (row, col)
 
+    # SpawnPoint/Bomber: spawnorientation overrides orientation of spawned sprites
+    spawn_ori_val = args.get('spawnorientation', None)
+    if isinstance(spawn_ori_val, str) and spawn_ori_val in ORIENTATION_MAP:
+        spawn_orientation = ORIENTATION_MAP[spawn_ori_val]
+    else:
+        spawn_orientation = (0.0, 0.0)  # (0,0) = not set, use target's default
+
     is_static = sc in STATIC_CLASSES
 
     singleton = bool(args.get('singleton', False))
@@ -394,6 +401,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
         min_ammo=min_ammo,
         ammo_cost=ammo_cost,
         rotate_in_place=rotate_in_place,
+        spawn_orientation=spawn_orientation,
     )
 
 

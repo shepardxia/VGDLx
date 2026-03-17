@@ -166,6 +166,7 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
 
         # Save previous positions for stepBack / undoAll / bounceForward
         prev_positions = state.positions
+        prev_alive = state.alive  # Track which sprites are alive before NPC loop
 
         # 1. Avatar: preMovement then update (matching GVGAI tick() lines 1365-1371)
         for at in avatar_config.avatar_type_indices:
@@ -226,15 +227,26 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                 state = _update_npc(state, type_idx, cfg, height, width,
                                     block_size=block_size)
 
+        # 3b. For newly spawned sprites (alive changed False→True during NPC loop),
+        # update prev_positions to their spawn position so step_back reverts to
+        # the spawn position, not (0,0). Non-spawned sprites keep their pre-movement
+        # prev_positions so step_back correctly reverts NPC movement.
+        newly_alive = state.alive & ~prev_alive
+        prev_positions = jnp.where(
+            newly_alive[:, :, None], state.positions, prev_positions)
+
         # 4. Age sprites and kill expired flickers
-        new_ages = jnp.where(state.alive, state.ages + 1, state.ages)
+        # GVGAI Flicker.java: `if(age > limit) kill; age++;`
+        # Check BEFORE increment with strict >, then increment survivors.
         flicker_limits = jnp.array(
             [cfg.flicker_limit for cfg in sprite_configs],
             dtype=jnp.int32)[:, None]
-        flicker_expired = (flicker_limits > 0) & (new_ages >= flicker_limits)
+        flicker_expired = (flicker_limits > 0) & (state.ages > flicker_limits)
+        new_alive = state.alive & ~flicker_expired
+        new_ages = jnp.where(new_alive, state.ages + 1, state.ages)
         state = state.replace(
             ages=new_ages,
-            alive=state.alive & ~flicker_expired,
+            alive=new_alive,
         )
 
         # 5. Apply effects via collision detection + masks

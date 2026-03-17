@@ -372,6 +372,7 @@ class SpriteDef:
     min_ammo: int = -1                   # RC8: minimum ammo to shoot (-1 = use >0 check)
     ammo_cost: int = 1                   # RC8: ammo consumed per shot
     rotate_in_place: bool = False        # RC2: OrientedAvatar rotateInPlace (default True for oriented avatars)
+    spawn_orientation: Tuple[float, float] = (0.0, 0.0)  # SpawnPoint/Bomber: override orientation of spawned sprites
 
 
 @dataclass
