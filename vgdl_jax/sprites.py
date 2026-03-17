@@ -204,9 +204,6 @@ def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
     move, but we clear the flag afterwards.
     """
     rng, key = jax.random.split(state.rng)
-    alive = state.alive[type_idx]
-    first_tick = state.is_first_tick[type_idx] & alive
-    can_move = (state.cooldown_timers[type_idx] >= cooldown) & alive
 
     # Convert pixel positions to cells for distance field lookup
     chaser_cell = state.positions[type_idx] // block_size  # [max_n, 2] int32
@@ -248,9 +245,8 @@ def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
     rand_delta = DIRECTION_DELTAS[rand_dirs]
     delta = jnp.where(any_target_alive, delta, rand_delta)
 
-    speed = state.speeds[type_idx]  # [max_n] int32 pixel displacement
-    new_pos = state.positions[type_idx] + delta * speed[:, None] * can_move[:, None].astype(jnp.int32)
-    new_timers = jnp.where(can_move, 0, state.cooldown_timers[type_idx])
+    new_pos, new_timers, can_move, first_tick = _move_with_cooldown(
+        state, type_idx, cooldown, deltas=delta, passive=False)
     new_ori = jnp.where(can_move[:, None], delta.astype(jnp.float32),
                         state.orientations[type_idx])
     return _apply_npc_move(state, type_idx, new_pos, new_timers, new_ori=new_ori, rng=rng,
@@ -264,6 +260,11 @@ def spawn_sprite(state: GameState, pos, target_type, orientation, speed):
     is_first_tick=True. The reverse NPC loop in step.py gives these sprites
     per-type preMovement (0→1) then update (isFirstTick blocks passiveMovement,
     clears flag) in the same tick — matching GVGAI's per-sprite processing.
+
+    NOTE: The field writes here (alive, positions, orientations, speeds, ages,
+    cooldown_timers, is_first_tick) duplicate _fill_slots() in effects.py.
+    Cannot call _fill_slots directly because effects.py imports from sprites.py,
+    so importing effects.py here would create a circular import. Keep in sync.
     """
     available = ~state.alive[target_type]
     slot = jnp.argmax(available)
@@ -301,6 +302,11 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
 
     If target_singleton=True, only spawns if no alive sprites of target_type
     exist (matching GVGAI's singletons[typeInt] check in Game.addSprite).
+
+    NOTE: The slot-filling field writes (alive, positions, orientations, speeds,
+    ages, cooldown_timers, is_first_tick) duplicate _fill_slots() in effects.py.
+    Cannot call _fill_slots directly because effects.py imports from sprites.py,
+    so importing effects.py here would create a circular import. Keep in sync.
     """
     rng, key = jax.random.split(state.rng)
     max_n = state.alive.shape[1]

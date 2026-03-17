@@ -517,45 +517,20 @@ def _build_trajectory_result(entry, actions, step_comparisons):
 
 
 def get_sprite_configs(compiled):
-    """Extract sprite_configs list from a CompiledGame."""
-    from vgdl_jax.data_model import SpriteClass
+    """Extract sprite_configs list from a CompiledGame.
+
+    Delegates to compiler._build_sprite_configs for the actual resolution logic
+    (SpawnPoint target orientation/speed, spawn_orientation override, etc.) and
+    converts to dicts for backward compatibility with RNGRecorder.
+    """
+    from dataclasses import asdict
+    from vgdl_jax.compiler import _build_sprite_configs
+    from vgdl_jax.data_model import get_block_size
 
     gd = compiled.game_def
-    sprite_configs = []
-    for sd in gd.sprites:
-        base_cooldown = max(sd.cooldown, 1)
-        if sd.speed > 0 and sd.speed != 1.0:
-            effective_cooldown = max(1, round(base_cooldown / sd.speed))
-        else:
-            effective_cooldown = base_cooldown
-
-        cfg = dict(
-            sprite_class=sd.sprite_class,
-            cooldown=effective_cooldown,
-            flicker_limit=sd.flicker_limit,
-        )
-
-        if sd.sprite_class in (SpriteClass.CHASER, SpriteClass.FLEEING):
-            target_key = sd.spawner_stype
-            target_indices = gd.resolve_stype(target_key) if target_key else []
-            cfg['target_type_idx'] = target_indices[0] if target_indices else 0
-
-        elif sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
-            target_key = sd.spawner_stype
-            target_indices = gd.resolve_stype(target_key) if target_key else []
-            cfg['target_type_idx'] = target_indices[0] if target_indices else 0
-            cfg['prob'] = sd.spawner_prob
-            cfg['total'] = sd.spawner_total
-            if target_indices:
-                target_sd = gd.sprites[target_indices[0]]
-                cfg['target_orientation'] = list(target_sd.orientation)
-                cfg['target_speed'] = target_sd.speed
-            else:
-                cfg['target_orientation'] = [0., 0.]
-                cfg['target_speed'] = 0.0
-
-        sprite_configs.append(cfg)
-    return sprite_configs
+    block_size = get_block_size(gd)
+    configs = _build_sprite_configs(gd, block_size)
+    return [asdict(cfg) for cfg in configs]
 
 
 def get_effects(compiled):
