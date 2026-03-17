@@ -290,7 +290,7 @@ def spawn_sprite(state: GameState, pos, target_type, orientation, speed):
 
 def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
                        target_type, target_orientation, target_speed,
-                       target_singleton=False):
+                       target_singleton=False, target_cons=0):
     """Conditionally spawn sprites — fully vectorized via prefix-sum slot allocation.
 
     Uses spawn_timers (not cooldown_timers) for spawn readiness checks, so
@@ -302,6 +302,10 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
 
     If target_singleton=True, only spawns if no alive sprites of target_type
     exist (matching GVGAI's singletons[typeInt] check in Game.addSprite).
+
+    If target_cons > 0, set direction_ticks=cons and orientation=(0,0) for
+    spawned sprites (RandomNPC cons initialization, matching GVGAI addSprite
+    from template with counter=0, prevAction=DNONE).
 
     NOTE: The slot-filling field writes (alive, positions, orientations, speeds,
     ages, cooldown_timers, is_first_tick) duplicate _fill_slots() in effects.py.
@@ -327,6 +331,12 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     should_fill, src_idx = prefix_sum_allocate(state.alive[target_type], should_spawn)
     src_pos = state.positions[type_idx][src_idx]
 
+    # Orientation: if target_cons > 0, use (0,0) = DNONE for cons init
+    if target_cons > 0:
+        spawn_orientation = jnp.zeros(2, dtype=jnp.float32)
+    else:
+        spawn_orientation = target_orientation
+
     state = state.replace(
         alive=state.alive.at[target_type].set(
             state.alive[target_type] | should_fill),
@@ -334,7 +344,7 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
             jnp.where(should_fill[:, None], src_pos,
                       state.positions[target_type])),
         orientations=state.orientations.at[target_type].set(
-            jnp.where(should_fill[:, None], target_orientation,
+            jnp.where(should_fill[:, None], spawn_orientation,
                       state.orientations[target_type])),
         speeds=state.speeds.at[target_type].set(
             jnp.where(should_fill, target_speed,
@@ -347,6 +357,13 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
             jnp.where(should_fill, True, state.is_first_tick[target_type])),
         rng=rng,
     )
+
+    # Set direction_ticks for RandomNPC cons initialization
+    if target_cons > 0:
+        state = state.replace(
+            direction_ticks=state.direction_ticks.at[target_type].set(
+                jnp.where(should_fill, target_cons,
+                           state.direction_ticks[target_type])))
 
     # Update spawn counts — only for spawners that actually got a slot
     n_filled = should_fill.sum()
@@ -371,27 +388,53 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     return state
 
 
-def update_spreader(state: GameState, type_idx, spreadprob, target_type=-1, block_size=1):
+def flicker_age(state, type_idx, flicker_limit):
+    """GVGAI Flicker.update() aging: if(age > limit) kill; age++.
+
+    Called inside NPC updaters for Flicker-derived types (Flicker, OrientedFlicker,
+    Spreader) so aging happens per-type during the NPC loop, matching GVGAI's
+    Flicker.update() which runs inside the tick() NPC loop. This prevents newly
+    spawned Flicker sprites from being aged on their spawn tick (they weren't in
+    the iteration list when their type's NPC updater ran).
+
+    Step 4's global aging skips types with flicker_limit > 0 since they age here.
+    """
+    alive = state.alive[type_idx]
+    ages = state.ages[type_idx]
+    expired = (ages > flicker_limit) & alive
+    new_alive = alive & ~expired
+    new_ages = jnp.where(new_alive, ages + 1, ages)
+    return state.replace(
+        alive=state.alive.at[type_idx].set(new_alive),
+        ages=state.ages.at[type_idx].set(new_ages),
+    )
+
+
+def update_spreader(state: GameState, type_idx, flicker_limit, spreadprob,
+                    target_type=-1, block_size=1):
     """Spreader: at age==2, spread to 4 adjacent cells with probability `spreadprob` each.
 
     GVGAI: `int newType = (itype == -1) ? this.getType() : itype;`
     When target_type >= 0, spawn into that type's slots; otherwise into self.
 
-    GVGAI timing: Flicker.update() increments age INSIDE the NPC loop, then
-    Spreader checks `if(age==2)` after the increment. VGDLx increments ages
-    AFTER the NPC loop (step 4). So we check `ages + 1 == 2` (i.e., ages == 1)
-    to match the post-increment check that GVGAI performs.
+    GVGAI timing: Spreader.update() calls super.update() (Flicker), which does
+    `if(age > limit) kill; age++`. Then Spreader checks `if(age == 2)` using the
+    post-increment age. We match this by calling flicker_age() first (which does
+    the death check + increment), then checking the updated ages.
 
     Neighbor positions are one cell away = block_size pixels in each direction.
     """
+    # Step 1: Flicker aging (super.update()) — death check + age increment
+    state = flicker_age(state, type_idx, flicker_limit)
+
     rng, key = jax.random.split(state.rng)
     max_n = state.alive.shape[1]
 
     is_alive = state.alive[type_idx]
     ages = state.ages[type_idx]
-    # GVGAI: Flicker.update() does age++ then Spreader checks age==2.
-    # VGDLx defers age++, so check ages+1==2 (i.e., ages==1).
-    should_spread = is_alive & (ages == 1)
+    # GVGAI: Flicker.update() did age++, then Spreader checks age==2.
+    # flicker_age() already incremented, so check ages==2 directly.
+    should_spread = is_alive & (ages == 2)
 
     # Random gate per sprite per direction
     rng, key_rand = jax.random.split(rng)

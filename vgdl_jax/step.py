@@ -22,7 +22,7 @@ from vgdl_jax.sprites import (
     update_missile, update_erratic_missile, update_random_npc,
     update_random_inertial, update_spreader, update_chaser,
     update_spawn_point, update_walk_jumper,
-    _manhattan_distance_field,
+    _manhattan_distance_field, flicker_age,
 )
 from vgdl_jax.terminations import check_all_terminations
 
@@ -235,19 +235,18 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
         prev_positions = jnp.where(
             newly_alive[:, :, None], state.positions, prev_positions)
 
-        # 4. Age sprites and kill expired flickers
-        # GVGAI Flicker.java: `if(age > limit) kill; age++;`
-        # Check BEFORE increment with strict >, then increment survivors.
+        # 4. Age non-Flicker sprites
+        # Flicker-derived types (Flicker, OrientedFlicker, Spreader) handle their
+        # own aging inside their NPC updaters via flicker_age(), matching GVGAI's
+        # Flicker.update() which runs inside the tick() NPC loop. This prevents
+        # newly spawned Flicker sprites from being aged on their spawn tick.
+        # Non-Flicker types still get global aging here (for spawn_timers etc.).
         flicker_limits = jnp.array(
             [cfg.flicker_limit for cfg in sprite_configs],
             dtype=jnp.int32)[:, None]
-        flicker_expired = (flicker_limits > 0) & (state.ages > flicker_limits)
-        new_alive = state.alive & ~flicker_expired
-        new_ages = jnp.where(new_alive, state.ages + 1, state.ages)
-        state = state.replace(
-            ages=new_ages,
-            alive=new_alive,
-        )
+        is_flicker_type = flicker_limits > 0  # [n_types, 1] — types that age via NPC updater
+        new_ages = jnp.where(~is_flicker_type & state.alive, state.ages + 1, state.ages)
+        state = state.replace(ages=new_ages)
 
         # 5. Apply effects via collision detection + masks
         state = _apply_all_effects(state, prev_positions, effects,
@@ -905,7 +904,8 @@ def _npc_spawn_point(state, type_idx, cfg, height, width, block_size):
         target_type=cfg.target_type_idx,
         target_orientation=jnp.array(cfg.target_orientation, dtype=jnp.float32),
         target_speed=cfg.target_speed,
-        target_singleton=cfg.target_singleton)
+        target_singleton=cfg.target_singleton,
+        target_cons=cfg.target_cons)
 
 
 def _npc_bomber(state, type_idx, cfg, height, width, block_size):
@@ -919,12 +919,12 @@ _NPC_UPDATERS = {
     SpriteClass.MISSILE: lambda s, ti, cfg, h, w, bs: update_missile(s, ti, cfg.cooldown),
     SpriteClass.ERRATIC_MISSILE: lambda s, ti, cfg, h, w, bs: update_erratic_missile(s, ti, cfg.cooldown, prob=cfg.prob),
     SpriteClass.RANDOM_NPC: lambda s, ti, cfg, h, w, bs: update_random_npc(s, ti, cfg.cooldown, cons=cfg.cons),
-    SpriteClass.FLICKER: lambda s, ti, cfg, h, w, bs: s,
-    SpriteClass.ORIENTED_FLICKER: lambda s, ti, cfg, h, w, bs: s,
+    SpriteClass.FLICKER: lambda s, ti, cfg, h, w, bs: flicker_age(s, ti, cfg.flicker_limit),
+    SpriteClass.ORIENTED_FLICKER: lambda s, ti, cfg, h, w, bs: flicker_age(s, ti, cfg.flicker_limit),
     SpriteClass.SPAWN_POINT: _npc_spawn_point,
     SpriteClass.BOMBER: _npc_bomber,
     SpriteClass.WALKER: lambda s, ti, cfg, h, w, bs: update_missile(s, ti, cfg.cooldown),
-    SpriteClass.SPREADER: lambda s, ti, cfg, h, w, bs: update_spreader(s, ti, spreadprob=cfg.spreadprob, target_type=cfg.target_type_idx, block_size=bs),
+    SpriteClass.SPREADER: lambda s, ti, cfg, h, w, bs: update_spreader(s, ti, flicker_limit=cfg.flicker_limit, spreadprob=cfg.spreadprob, target_type=cfg.target_type_idx, block_size=bs),
     SpriteClass.RANDOM_INERTIAL: lambda s, ti, cfg, h, w, bs: update_random_inertial(s, ti, mass=cfg.mass, strength=cfg.strength),
     SpriteClass.RANDOM_MISSILE: lambda s, ti, cfg, h, w, bs: update_missile(s, ti, cfg.cooldown),
     SpriteClass.WALK_JUMPER: lambda s, ti, cfg, h, w, bs: update_walk_jumper(s, ti, prob=cfg.prob, strength=cfg.strength, gravity=cfg.gravity, mass=cfg.mass),
