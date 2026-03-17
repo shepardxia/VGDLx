@@ -1,8 +1,9 @@
 # VGDLx vs GVGAI Divergence Investigation Report
 
-**Date**: 2026-03-14
-**State**: 16/42 match, 26 failures
+**Date**: 2026-03-14 (updated 2026-03-17)
+**State**: 29/42 match, 13 failures (was 16/42 at start of investigation)
 **Method**: 6 parallel investigator agents → 1 synthesis agent → 6 parallel root-cause agents
+**Fixes applied**: RC1 (RNG replay), RC2 (rotateInPlace), RC3 (spawn_timers), RC4 (projectile offset), RC5 (static_a AABB), RC6 (bounceForward repeat), RC7 (singleton), RC8 (FlakAvatar ammo), RC9 (DNONE cooldown), plus: flicker lifetime, EOS-as-actor, EOS rect detection, prev_positions for spawned sprites, spawn timing tick-0, spawnorientation
 
 ## Root Causes (ranked by impact)
 

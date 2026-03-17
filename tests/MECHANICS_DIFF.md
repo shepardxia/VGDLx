@@ -37,7 +37,7 @@ GVGAI: `Rectangle.intersects()`, integer pixels. VGDLx: grid occupancy or AABB (
 
 **Chaser** — GVGAI: greedy 1-step Manhattan, random tiebreak. VGDLx: distance field relaxation, routes around walls (accepted as better).
 
-**SpawnPoint** — GVGAI: `(start_tick + game_tick) % cooldown`. VGDLx: per-sprite incrementing timers, initialized to `cooldown - 1` for level-placed sprites (matching GVGAI's tick-0 fire). Dynamically spawned sprites still init to 0 (matching GVGAI's deferred first-update for new sprites).
+**SpawnPoint** — GVGAI: `(start_tick + game_tick) % cooldown`. VGDLx: per-sprite `spawn_timers` (independent of `cooldown_timers`), init to `cd` so first `_pre_spawn` increments to `cd+1 >= cd` firing at tick 0.
 
 **Walker** — GVGAI: gravity + `airsteering`, `speed=5`. VGDLx: horizontal walk + random jumps.
 
@@ -52,7 +52,7 @@ Not implemented in VGDLx:
 - **Per-player scoring** — `scoreChange` parsed per player ID
 - **StopCounter** — conditional gating via `canEnd` flag on other terminations
 - **count_score** — winners by comparing avatar scores
-- **Effect repeat** — `repeat` param controls firings per collision per step
+- ~~**Effect repeat**~~ — `repeat` now supported (CompiledEffect duplicated N times)
 
 ## GVGAI-Only Effects & Avatars
 
@@ -64,17 +64,23 @@ Not implemented in VGDLx:
 
 ## GVGAI Cross-Engine Validation (42 supported games, 40 steps)
 
-**15 exact match**: bait, brainman, chainreaction, chipschallenge, clusters, cookmepasta, flower, modality, realsokoban, shipwreck, sokoban, superman, thecitadel, thesnowman, wrapsokoban
+**29 exact match**: aliens, avoidgeorge, bait, brainman, chainreaction, chase, chipschallenge, clusters, cookmepasta, eggomania, factorymanager, flower, islands, jaws, missilecommand, modality, portals, realsokoban, rivers, shipwreck, sokoban, superman, surround, tercio, thecitadel, thesnowman, waitforbreakfast, waves, wrapsokoban
 
-**~21 speed/position** (with or without SpawnPoint): aliens, angelsdemons, assemblyline, avoidgeorge, butterflies, chopper, defender, eggomania, factorymanager, ikaruga, infection, jaws, missilecommand, myAliens, plaqueattack, portals, rivers, sheriff, surround, waitforbreakfast, waves, wildgunman — GVGAI truncates `int(speed * blockSize)` to integer pixel displacement each tick, producing integer pixel positions. VGDLx uses `pos += ori * effective_speed` with float32 accumulation. Even with matching per-tick displacement magnitude, positions drift because GVGAI rounds to pixel grid each tick.
+**3 RNG consumption order**: butterflies, chopper, infection — reverse NPC loop produces different RNG sequences than GVGAI's per-sprite iteration within type lists. Known limitation.
 
-**2 movement blocking**: chase, whackamole — NOT chaser algorithm. Sprites compute correct new_pos but movement is reverted downstream (EOS detection or stepBack reverting valid moves).
+**3 spawn/RNG timing**: defender, ikaruga, whackamole — stochastic spawn timing offset produces different RNG roll outcomes.
 
-**2 partial** (noop matches, movement fails): glow, islands — action mapping fixed (noop now matches), remaining failures from speed/position physics.
+**2 spawn position (prev_positions)**: angelsdemons, wildgunman — spawned sprites still teleport to (0,0) after step_back. prev_positions fix applied but may need further investigation.
 
-**1 partial** (bounceForward): tercio — crate doesn't move after avatar collision in VGDLx.
+**1 Spreader not fully implemented**: glow — noop matches, random fails. Spark (Spreader) dies before spreading due to remaining Flicker interaction.
 
-**1 compile error**: sistersavior — VGDLx can't find avatar in game definition.
+**1 EOS/turnAround**: myAliens — EOS rect fix applied but turnAround implementation may diverge from GVGAI's `activeMovement(DDOWN)` chain.
+
+**1 spawnorientation/RNG**: sheriff — spawnorientation fix applied but remaining divergence.
+
+**1 block_size/misc**: assemblyline — possible block_size mismatch or prev_positions issue.
+
+**1 spawn timing**: plaqueattack — spawn timing + prev_positions interaction.
 
 ## Coverage (VGDLx / GVGAI)
 
