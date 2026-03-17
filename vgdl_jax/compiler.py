@@ -335,6 +335,9 @@ def _build_sprite_configs(game_def, block_size):
                 else:
                     cfg.target_orientation = tuple(target_sd.orientation)
                 cfg.target_speed = speed_to_pixels(target_sd.speed, block_size, target_sd.physics_type)
+                # RandomNPC targets need cons initialization (DNONE for first cons ticks)
+                if target_sd.sprite_class == SpriteClass.RANDOM_NPC and target_sd.cons > 0:
+                    cfg.target_cons = target_sd.cons
             else:
                 cfg.target_orientation = (0., 0.)
                 cfg.target_speed = 0

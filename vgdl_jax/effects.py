@@ -22,7 +22,7 @@ from typing import Optional, Callable
 from vgdl_jax.collision import in_bounds
 from vgdl_jax.data_model import (
     DEFAULT_RESOURCE_LIMIT, MOVING_NPC_CLASSES,
-    speed_to_pixels,
+    SpriteClass, speed_to_pixels,
 )
 from vgdl_jax.sprites import DIRECTION_DELTAS, prefix_sum_allocate
 
@@ -133,12 +133,17 @@ def _nearest_partner(pos_a, state, type_b, eff_b):
 
 def _fill_slots(state, target_type, source_mask, src_positions,
                 src_orientations=None, target_speed=None, reset_cooldown=False,
-                src_resources=None):
+                src_resources=None, target_cons=0):
     """Allocate dead slots in target_type and fill with source data.
 
     Effect-spawned sprites get is_first_tick=True and cooldown_timers=0.
     In GVGAI, effects happen after the tick loop, so spawned sprites don't
     get same-tick processing — their isFirstTick is consumed on the next tick.
+
+    target_cons: if > 0, set direction_ticks=cons and orientation=(0,0) for
+        newly filled slots. Matches GVGAI's addSprite() which creates from
+        template with counter=0, prevAction=DNONE — the first `cons` calls
+        to getRandomMove() produce DNONE (no movement).
     """
     should_fill, src_idx = prefix_sum_allocate(state.alive[target_type], source_mask)
     src_pos = src_positions[src_idx]
@@ -151,7 +156,17 @@ def _fill_slots(state, target_type, source_mask, src_positions,
         is_first_tick=state.is_first_tick.at[target_type].set(
             state.is_first_tick[target_type] | should_fill),
     )
-    if src_orientations is not None:
+    if target_cons > 0:
+        # RandomNPC cons init: direction_ticks=cons, orientation=(0,0) = DNONE
+        state = state.replace(
+            direction_ticks=state.direction_ticks.at[target_type].set(
+                jnp.where(should_fill, target_cons,
+                           state.direction_ticks[target_type])),
+            orientations=state.orientations.at[target_type].set(
+                jnp.where(should_fill[:, None],
+                           jnp.zeros(2, dtype=jnp.float32),
+                           state.orientations[target_type])))
+    elif src_orientations is not None:
         src_ori = src_orientations[src_idx]
         state = state.replace(
             orientations=state.orientations.at[target_type].set(
@@ -434,6 +449,7 @@ def spend_avatar_resource(state, mask, score_delta, kwargs, **_):
 def transform_to(state, type_a, mask, score_delta, kwargs, **_):
     new_type = kwargs['new_type_idx']
     target_speed = kwargs.get('target_speed', None)
+    target_cons = kwargs.get('target_cons', 0)
     copy_ori = kwargs.get('copy_orientation', True)
     if copy_ori:
         orientations = state.orientations[type_a]
@@ -446,14 +462,17 @@ def transform_to(state, type_a, mask, score_delta, kwargs, **_):
     return _fill_slots(state, new_type, mask,
                        state.positions[type_a], orientations,
                        target_speed=target_speed, reset_cooldown=True,
-                       src_resources=state.resources[type_a])
+                       src_resources=state.resources[type_a],
+                       target_cons=target_cons)
 
 
 def clone_sprite(state, type_a, mask, score_delta, kwargs=None, **_):
     target_speed = kwargs.get('target_speed', None) if kwargs else None
+    target_cons = kwargs.get('target_cons', 0) if kwargs else 0
     state = _fill_slots(state, type_a, mask,
                         state.positions[type_a], state.orientations[type_a],
-                        target_speed=target_speed, reset_cooldown=True)
+                        target_speed=target_speed, reset_cooldown=True,
+                        target_cons=target_cons)
     return _with_score(state, score_delta)
 
 
@@ -462,11 +481,13 @@ def spawn_if_has_more(state, type_a, mask, score_delta, kwargs, **_):
     limit = kwargs.get('limit', 0)
     spawn_type = kwargs.get('spawn_type_idx', -1)
     target_speed = kwargs.get('target_speed', None)
+    target_cons = kwargs.get('target_cons', 0)
     if spawn_type >= 0:
         has_enough = mask & (state.resources[type_a, :, r_idx] >= limit)
         state = _fill_slots(state, spawn_type, has_enough,
                             state.positions[type_a],
-                            target_speed=target_speed, reset_cooldown=True)
+                            target_speed=target_speed, reset_cooldown=True,
+                            target_cons=target_cons)
     return _with_score(state, score_delta)
 
 
@@ -474,6 +495,7 @@ def transform_others_to(state, type_a, mask, score_delta, kwargs, **_):
     target_type = kwargs.get('target_type_idx', -1)
     new_type = kwargs.get('new_type_idx', -1)
     target_speed = kwargs.get('target_speed', None)
+    target_cons = kwargs.get('target_cons', 0)
     if target_type >= 0 and new_type >= 0:
         any_collision = mask.any()
         target_alive = state.alive[target_type] & any_collision
@@ -482,7 +504,8 @@ def transform_others_to(state, type_a, mask, score_delta, kwargs, **_):
         state = _fill_slots(state, new_type, target_alive,
                             state.positions[target_type],
                             state.orientations[target_type],
-                            target_speed=target_speed, reset_cooldown=True)
+                            target_speed=target_speed, reset_cooldown=True,
+                            target_cons=target_cons)
     return _with_score(state, score_delta)
 
 
@@ -833,13 +856,19 @@ def _ckw_transform_to(ed, ctx):
                   'copy_orientation': copy_ori}
         if not copy_ori:
             result['default_orientation'] = dst_def.orientation
+        # RandomNPC cons: spawned sprite starts with DNONE for cons ticks
+        if dst_def.sprite_class == SpriteClass.RANDOM_NPC and dst_def.cons > 0:
+            result['target_cons'] = dst_def.cons
         return result
     return {}
 
 def _ckw_clone_sprite(ed, ctx):
     if ctx.concrete_actor_idx is not None:
         sd = ctx.game_def.sprites[ctx.concrete_actor_idx]
-        return {'target_speed': speed_to_pixels(sd.speed, ctx.block_size, sd.physics_type)}
+        result = {'target_speed': speed_to_pixels(sd.speed, ctx.block_size, sd.physics_type)}
+        if sd.sprite_class == SpriteClass.RANDOM_NPC and sd.cons > 0:
+            result['target_cons'] = sd.cons
+        return result
     return {}
 
 def _ckw_change_resource(ed, ctx):
@@ -904,6 +933,8 @@ def _ckw_spawn_if_has_more(ed, ctx):
         sd = ctx.game_def.sprites[idx]
         kwargs['spawn_type_idx'] = idx
         kwargs['target_speed'] = speed_to_pixels(sd.speed, ctx.block_size, sd.physics_type)
+        if sd.sprite_class == SpriteClass.RANDOM_NPC and sd.cons > 0:
+            kwargs['target_cons'] = sd.cons
     return kwargs
 
 def _ckw_prob_half(ed, ctx):
@@ -951,6 +982,8 @@ def _ckw_transform_others_to(ed, ctx):
         sd = ctx.game_def.sprites[idx]
         kwargs['new_type_idx'] = idx
         kwargs['target_speed'] = speed_to_pixels(sd.speed, ctx.block_size, sd.physics_type)
+        if sd.sprite_class == SpriteClass.RANDOM_NPC and sd.cons > 0:
+            kwargs['target_cons'] = sd.cons
     return kwargs
 
 def _ckw_wall_physics(ed, ctx):

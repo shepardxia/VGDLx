@@ -402,16 +402,23 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
             slots = np.where(alive_mask)[0]
             if len(slots) == 0:
                 continue
+            # RandomNPC entries use consume-and-remove to handle position overlap
+            # (e.g. after cloneSprite or when two RandomNPCs move to the same cell).
+            # Chaser/Fleeing don't need this since their directions are deterministic.
+            use_consume = (sc == SpriteClass.RANDOM_NPC)
             entries = []
             for slot in slots:
                 r, c = pre_pos[ti, slot, 0], pre_pos[ti, slot, 1]
                 ori_r, ori_c = post_ori[ti, slot, 0], post_ori[ti, slot, 1]
                 basedirs_idx = _ORI_TO_BASEDIRS.get(
                     (round(float(ori_r)), round(float(ori_c))), -1)
-                entries.append({
+                entry = {
                     "pos": [float(r), float(c)],  # already in pixels
                     "dir": basedirs_idx,
-                })
+                }
+                if use_consume:
+                    entry["consume"] = True
+                entries.append(entry)
             record[sd.key] = entries
 
         # Spawn-consuming types

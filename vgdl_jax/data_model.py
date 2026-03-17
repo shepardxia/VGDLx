@@ -488,3 +488,4 @@ class SpriteConfig:
     target_speed: float = 0.0
     target_singleton: bool = False  # RC7: refuse to spawn if target already alive
     cons: int = 0  # RandomNPC: repeat same direction for N consecutive ticks
+    target_cons: int = 0  # SpawnPoint/Bomber: cons value of target type (for RandomNPC targets)
