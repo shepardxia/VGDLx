@@ -157,7 +157,8 @@ def _fill_slots(state, target_type, source_mask, src_positions,
             state.is_first_tick[target_type] | should_fill),
     )
     if target_cons > 0:
-        # RandomNPC cons init: direction_ticks=cons, orientation=(0,0) = DNONE
+        # RandomNPC cons init: overrides src_orientations — GVGAI addSprite()
+        # sets prevAction=DNONE regardless of source orientation.
         state = state.replace(
             direction_ticks=state.direction_ticks.at[target_type].set(
                 jnp.where(should_fill, target_cons,
@@ -836,6 +837,13 @@ def null(state, score_delta, **_):
     return _with_score(state, score_delta)
 
 
+def _add_spawn_kwargs(kwargs, sd, block_size):
+    """Add target_speed and target_cons to effect kwargs for a spawn target."""
+    kwargs['target_speed'] = speed_to_pixels(sd.speed, block_size, sd.physics_type)
+    if sd.sprite_class == SpriteClass.RANDOM_NPC and sd.cons > 0:
+        kwargs['target_cons'] = sd.cons
+
+
 # ── Compile-time kwargs ────────────────────────────────────────────
 
 def _ckw_transform_to(ed, ctx):
@@ -851,23 +859,18 @@ def _ckw_transform_to(ed, ctx):
         copy_ori = force_ori or (
             (src_oriented is not None and src_oriented.is_oriented) and
             (dst_oriented is not None and dst_oriented.is_oriented))
-        dst_speed = speed_to_pixels(dst_def.speed, ctx.block_size, dst_def.physics_type)
-        result = {'new_type_idx': idx, 'target_speed': dst_speed,
-                  'copy_orientation': copy_ori}
+        result = {'new_type_idx': idx, 'copy_orientation': copy_ori}
+        _add_spawn_kwargs(result, dst_def, ctx.block_size)
         if not copy_ori:
             result['default_orientation'] = dst_def.orientation
-        # RandomNPC cons: spawned sprite starts with DNONE for cons ticks
-        if dst_def.sprite_class == SpriteClass.RANDOM_NPC and dst_def.cons > 0:
-            result['target_cons'] = dst_def.cons
         return result
     return {}
 
 def _ckw_clone_sprite(ed, ctx):
     if ctx.concrete_actor_idx is not None:
         sd = ctx.game_def.sprites[ctx.concrete_actor_idx]
-        result = {'target_speed': speed_to_pixels(sd.speed, ctx.block_size, sd.physics_type)}
-        if sd.sprite_class == SpriteClass.RANDOM_NPC and sd.cons > 0:
-            result['target_cons'] = sd.cons
+        result = {}
+        _add_spawn_kwargs(result, sd, ctx.block_size)
         return result
     return {}
 
@@ -932,9 +935,7 @@ def _ckw_spawn_if_has_more(ed, ctx):
     if idx is not None:
         sd = ctx.game_def.sprites[idx]
         kwargs['spawn_type_idx'] = idx
-        kwargs['target_speed'] = speed_to_pixels(sd.speed, ctx.block_size, sd.physics_type)
-        if sd.sprite_class == SpriteClass.RANDOM_NPC and sd.cons > 0:
-            kwargs['target_cons'] = sd.cons
+        _add_spawn_kwargs(kwargs, sd, ctx.block_size)
     return kwargs
 
 def _ckw_prob_half(ed, ctx):
@@ -981,9 +982,7 @@ def _ckw_transform_others_to(ed, ctx):
     if idx is not None:
         sd = ctx.game_def.sprites[idx]
         kwargs['new_type_idx'] = idx
-        kwargs['target_speed'] = speed_to_pixels(sd.speed, ctx.block_size, sd.physics_type)
-        if sd.sprite_class == SpriteClass.RANDOM_NPC and sd.cons > 0:
-            kwargs['target_cons'] = sd.cons
+        _add_spawn_kwargs(kwargs, sd, ctx.block_size)
     return kwargs
 
 def _ckw_wall_physics(ed, ctx):
