@@ -443,11 +443,16 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
             entries = []
             for slot in slots:
                 spawner_pos = pre_pos[ti, slot]  # [2] pixel coords
-                # Check if any newly alive target matches this spawner's position
+                # Check if any newly alive target matches this spawner's position.
+                # Use block_size as threshold: spawned sprites (Chaser, RandomNPC)
+                # can move up to speed_px pixels on their spawn tick, so by
+                # post_state they may no longer be at the spawner's position.
+                # speed_px < block_size for all grid-physics sprites, so
+                # block_size is a safe upper bound.
                 if len(new_target_pos) > 0:
                     dists = (np.abs(new_target_pos[:, 0] - spawner_pos[0])
                              + np.abs(new_target_pos[:, 1] - spawner_pos[1]))
-                    did_spawn = bool(np.any(dists < 2))
+                    did_spawn = bool(np.any(dists < block_size))
                 else:
                     did_spawn = False
                 roll = 0.0 if did_spawn else 1.0

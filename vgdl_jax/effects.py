@@ -313,22 +313,16 @@ def reverse_direction(state, type_a, mask, score_delta, **_):
 
 def turn_around(state, prev_positions, type_a, mask, score_delta,
                 height, width, block_size=1, **_):
-    # GVGAI: restore position, move DOWN twice at sprite's speed, reverse direction.
-    # activeMovement(sprite, DDOWN, sprite.speed) calls
-    #   _updatePos(DDOWN, (int)(speed * gridsize.width))
-    # which is state.speeds (int32 pixel displacement per tick).
+    # GVGAI TurnAround: restore position, call activeMovement(DDOWN) twice
+    # (which adds speed in the DOWN direction each time), then negate orientation.
+    # GVGAI does NOT clip the resulting position — the sprite can overshoot
+    # the screen boundary (EOS detection handles it later if needed).
     state = prim_restore_pos(state, type_a, mask, prev_positions)
     pos = state.positions[type_a]
     speed_px = state.speeds[type_a]  # [max_n] int32
     # 2 * speed_px downward (row += 2*speed, col unchanged)
     displacement = jnp.stack([2 * speed_px, jnp.zeros_like(speed_px)], axis=-1)
     displaced = pos + mask[:, None].astype(jnp.int32) * displacement
-    h_px = height * block_size - 1
-    w_px = width * block_size - 1
-    displaced = jnp.stack([
-        jnp.clip(displaced[:, 0], 0, h_px),
-        jnp.clip(displaced[:, 1], 0, w_px),
-    ], axis=-1)
     state = state.replace(positions=state.positions.at[type_a].set(
         jnp.where(mask[:, None], displaced, pos)))
     state = prim_negate_orientation(state, type_a, mask)
@@ -852,13 +846,18 @@ def _ckw_transform_to(ed, ctx):
         from vgdl_jax.data_model import SPRITE_REGISTRY
         src_def = ctx.game_def.sprites[ctx.concrete_actor_idx] if ctx.concrete_actor_idx is not None else None
         dst_def = ctx.game_def.sprites[idx]
-        # GVGAI: copy orientation only if both source and target are is_oriented
+        # GVGAI TransformTo.java line 64: copy orientation only when
+        # forceOrientation=true, OR (both src and dst are is_oriented AND
+        # the destination sprite's default orientation is DNONE).
+        # This prevents overwriting an explicit orientation on the destination type.
         src_oriented = SPRITE_REGISTRY.get(src_def.sprite_class, None) if src_def else None
         dst_oriented = SPRITE_REGISTRY.get(dst_def.sprite_class, None)
         force_ori = ed.kwargs.get('forceOrientation', 'false').lower() == 'true' if isinstance(ed.kwargs.get('forceOrientation'), str) else bool(ed.kwargs.get('forceOrientation', False))
+        dst_ori_is_dnone = (dst_def.orientation == (0.0, 0.0))
         copy_ori = force_ori or (
             (src_oriented is not None and src_oriented.is_oriented) and
-            (dst_oriented is not None and dst_oriented.is_oriented))
+            (dst_oriented is not None and dst_oriented.is_oriented) and
+            dst_ori_is_dnone)
         result = {'new_type_idx': idx, 'copy_orientation': copy_ori}
         _add_spawn_kwargs(result, dst_def, ctx.block_size)
         if not copy_ori:
