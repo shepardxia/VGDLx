@@ -329,15 +329,35 @@ def _build_sprite_configs(game_def, block_size):
             if target_idx >= 0:
                 cfg.target_singleton = game_def.sprites[target_idx].singleton
                 target_sd = game_def.sprites[target_idx]
-                # spawnorientation overrides target's default orientation
+                # GVGAI SpawnPoint.update() orientation logic:
+                # 1. If spawnorientation != DNONE: use spawnorientation
+                # 2. Else if newSprite.orientation == DNONE: use SpawnPoint's orientation
+                # 3. Else: keep target's orientation
+                # In VGDLx, DNONE maps to (0,0). A target with no explicit orientation
+                # would have DNONE in GVGAI, so we use the SpawnPoint's orientation.
                 if sd.spawn_orientation != (0.0, 0.0):
                     cfg.target_orientation = tuple(sd.spawn_orientation)
+                elif not target_sd.orientation_explicit:
+                    # Target has no explicit orientation (= GVGAI DNONE)
+                    # → use SpawnPoint's own orientation
+                    cfg.target_orientation = tuple(sd.orientation)
                 else:
                     cfg.target_orientation = tuple(target_sd.orientation)
                 cfg.target_speed = speed_to_pixels(target_sd.speed, block_size, target_sd.physics_type)
                 # RandomNPC targets need cons initialization (DNONE for first cons ticks)
                 if target_sd.sprite_class == SpriteClass.RANDOM_NPC and target_sd.cons > 0:
                     cfg.target_cons = target_sd.cons
+                # If target is itself a SpawnPoint/Bomber AND the spawner has a
+                # higher type_idx (so it processes first in the reverse NPC loop),
+                # the target gets _pre_spawn on its spawn tick. Init spawn_timers
+                # to cd-1 so the first _pre_spawn brings it to cd → fires.
+                # This matches GVGAI where start=gameTick and (start+gameTick)%cd=0
+                # on the same tick. If spawner has lower type_idx (target type
+                # iterates before spawner), the target's first _pre_spawn is
+                # next tick, so leave spawn_timers at default 0.
+                if target_sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
+                    if sd.type_idx > target_idx:
+                        cfg.target_spawn_timers_init = max(target_sd.cooldown, 1) - 1
             else:
                 cfg.target_orientation = (0., 0.)
                 cfg.target_speed = 0
@@ -626,8 +646,25 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
         if _is_chaser_target_stable(target_idx, game_def, sprite_configs,
                                      compiled_effects, avatar_sd.type_idx):
             from vgdl_jax.sprites import _manhattan_distance_field
+            if target_idx in static_type_set:
+                # Static types have positions in static_grids, not position arrays.
+                # Reconstruct position/alive arrays from the grid.
+                sg_idx = static_grid_map[target_idx]
+                grid = static_grid_data[sg_idx]  # [H, W] bool
+                coords = np.argwhere(grid)  # [N, 2] (row, col)
+                n_targets = len(coords)
+                target_pos = np.zeros((max(n_targets, 1), 2), dtype=np.int32)
+                target_alive = np.zeros(max(n_targets, 1), dtype=bool)
+                for k, (gr, gc) in enumerate(coords):
+                    target_pos[k] = [gr * block_size, gc * block_size]
+                    target_alive[k] = True
+                target_pos_jnp = jnp.array(target_pos)
+                target_alive_jnp = jnp.array(target_alive)
+            else:
+                target_pos_jnp = state.positions[target_idx]
+                target_alive_jnp = state.alive[target_idx]
             static_distance_fields[target_idx] = _manhattan_distance_field(
-                state.positions[target_idx], state.alive[target_idx],
+                target_pos_jnp, target_alive_jnp,
                 height, width, block_size)
 
     # Compile-time validation
@@ -652,7 +689,8 @@ def compile_game(game_def: GameDef, max_sprites_per_type=None):
                             sprite_configs, avatar_config, params,
                             chaser_target_set=frozenset(chaser_target_set),
                             static_distance_fields=static_distance_fields,
-                            action_map=action_map)
+                            action_map=action_map,
+                            static_grid_map=static_grid_map)
 
     return CompiledGame(
         init_state=state, step_fn=step_fn, n_actions=n_actions,

@@ -396,7 +396,8 @@ def run_comparison(entry: GameEntry, actions, seed=42, use_rng_replay=False, lev
             from .rng_replay import patch_chaser_directions
             patch_chaser_directions(record, prev_jax_state, sprite_configs,
                                     game_def.level.height, game_def.level.width,
-                                    block_size=bs)
+                                    block_size=bs,
+                                    static_grid_map=sgm)
             rng_replay.set_step_record(record)
 
         if not pv_done:

@@ -268,6 +268,8 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
         return ORIENTATION_MAP[v] if isinstance(v, str) and v in ORIENTATION_MAP else default
 
     orientation = _parse_ori('orientation', (0.0, 1.0))        # default RIGHT
+    orientation_explicit = ('orientation' in args and isinstance(args['orientation'], str)
+                            and args['orientation'] in ORIENTATION_MAP)
     spawn_orientation = _parse_ori('spawnorientation', (0.0, 0.0))  # (0,0) = not set
 
     is_static = sc in STATIC_CLASSES
@@ -395,6 +397,7 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
         ammo_cost=ammo_cost,
         rotate_in_place=rotate_in_place,
         spawn_orientation=spawn_orientation,
+        orientation_explicit=orientation_explicit,
     )
 
 

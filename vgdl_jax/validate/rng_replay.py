@@ -136,7 +136,8 @@ class RNGRecorder:
 
 
 def patch_chaser_directions(record, prev_jax_state, sprite_configs,
-                            height, width, block_size=1):
+                            height, width, block_size=1,
+                            static_grid_map=None):
     """Recompute actual chaser/fleeing directions using the distance field.
 
     Instead of extracting directions from position deltas (which fails for
@@ -150,8 +151,12 @@ def patch_chaser_directions(record, prev_jax_state, sprite_configs,
         height: grid height
         width: grid width
         block_size: pixels per cell
+        static_grid_map: dict {type_idx: static_grid_idx} for static types
     """
     from vgdl_jax.sprites import _manhattan_distance_field
+
+    if static_grid_map is None:
+        static_grid_map = {}
 
     for type_idx, cfg in enumerate(sprite_configs):
         sc = cfg['sprite_class']
@@ -164,9 +169,21 @@ def patch_chaser_directions(record, prev_jax_state, sprite_configs,
         target_type_idx = cfg.get('target_type_idx', 0)
 
         chaser_pos = prev_jax_state.positions[type_idx]  # int32 pixels
-        target_pos = prev_jax_state.positions[target_type_idx]
-        target_alive = prev_jax_state.alive[target_type_idx]
-        any_target_alive = bool(jnp.any(target_alive))
+
+        if target_type_idx in static_grid_map:
+            # Static target: reconstruct positions from static grid
+            sg_idx = static_grid_map[target_type_idx]
+            grid = np.array(prev_jax_state.static_grids[sg_idx])  # [H, W] bool
+            coords = np.argwhere(grid)  # [N, 2] (row, col)
+            if len(coords) == 0:
+                continue
+            target_pos = jnp.array(coords * block_size, dtype=jnp.int32)
+            target_alive = jnp.ones(len(coords), dtype=jnp.bool_)
+            any_target_alive = True
+        else:
+            target_pos = prev_jax_state.positions[target_type_idx]
+            target_alive = prev_jax_state.alive[target_type_idx]
+            any_target_alive = bool(jnp.any(target_alive))
 
         if not any_target_alive:
             # No targets — keep fallback random direction (already recorded)
@@ -353,7 +370,8 @@ _ORI_TO_BASEDIRS = {(-1, 0): 0, (0, -1): 1, (1, 0): 2, (0, 1): 3}
 
 
 def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
-                           spawn_target_map=None):
+                           spawn_target_map=None,
+                           reverse_spawn_map=None):
     """Build one step's GVGAI RNG injection record from VGDLx state transition.
 
     For direction-consuming sprites (RandomNPC, Chaser, Fleeing):
@@ -388,6 +406,7 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
     post_pos = np.array(post_state.positions)
     post_ori = np.array(post_state.orientations)
     post_alive = np.array(post_state.alive)
+    post_speeds = np.array(post_state.speeds)
 
     for sd in game_def.sprites:
         ti = sd.type_idx
@@ -398,20 +417,59 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
 
         # Direction-consuming NPC types
         if sc in (SpriteClass.RANDOM_NPC, SpriteClass.CHASER, SpriteClass.FLEEING):
+            # Include both pre-alive sprites AND newly-spawned sprites.
+            # Pre-alive: position from pre_pos (before movement).
+            # Newly-spawned: use spawner position (GVGAI getDirection() is called
+            # before the chaser moves, so the sprite is at its spawn location).
             alive_mask = pre_alive[ti]
-            slots = np.where(alive_mask)[0]
-            if len(slots) == 0:
+            newly_alive_mask = post_alive[ti] & ~pre_alive[ti]
+            all_slots = np.where(alive_mask | newly_alive_mask)[0]
+            if len(all_slots) == 0:
                 continue
             # RandomNPC entries use consume-and-remove to handle position overlap
             # (e.g. after cloneSprite or when two RandomNPCs move to the same cell).
             # Chaser/Fleeing don't need this since their directions are deterministic.
             use_consume = (sc == SpriteClass.RANDOM_NPC)
+
+            # Build a lookup for spawner positions → newly spawned sprite positions.
+            # For each newly-alive slot, find the spawner whose position matches.
+            spawn_positions = {}  # slot → (r, c) spawn position
+            if reverse_spawn_map and ti in reverse_spawn_map:
+                spawner_ti = reverse_spawn_map[ti]
+                spawner_alive = pre_alive[spawner_ti]
+                spawner_slots = np.where(spawner_alive)[0]
+                new_slots = np.where(newly_alive_mask)[0]
+                for ns in new_slots:
+                    post_r, post_c = post_pos[ti, ns, 0], post_pos[ti, ns, 1]
+                    # Find closest spawner
+                    best_dist = float('inf')
+                    best_spawner_pos = None
+                    for ss in spawner_slots:
+                        sp_r, sp_c = pre_pos[spawner_ti, ss, 0], pre_pos[spawner_ti, ss, 1]
+                        d = abs(float(post_r - sp_r)) + abs(float(post_c - sp_c))
+                        if d < best_dist:
+                            best_dist = d
+                            best_spawner_pos = (float(sp_r), float(sp_c))
+                    if best_spawner_pos is not None:
+                        spawn_positions[ns] = best_spawner_pos
+
             entries = []
-            for slot in slots:
-                r, c = pre_pos[ti, slot, 0], pre_pos[ti, slot, 1]
+            for slot in all_slots:
                 ori_r, ori_c = post_ori[ti, slot, 0], post_ori[ti, slot, 1]
                 basedirs_idx = _ORI_TO_BASEDIRS.get(
                     (round(float(ori_r)), round(float(ori_c))), -1)
+                if alive_mask[slot]:
+                    # Pre-existing sprite: use pre_pos
+                    r, c = pre_pos[ti, slot, 0], pre_pos[ti, slot, 1]
+                else:
+                    # Newly-spawned sprite: use spawner position if available,
+                    # otherwise back-compute from post_pos - direction * speed_px
+                    if slot in spawn_positions:
+                        r, c = spawn_positions[slot]
+                    else:
+                        speed_px = int(post_speeds[ti, slot])
+                        r = float(post_pos[ti, slot, 0]) - round(float(ori_r)) * speed_px
+                        c = float(post_pos[ti, slot, 1]) - round(float(ori_c)) * speed_px
                 entry = {
                     "pos": [float(r), float(c)],  # already in pixels
                     "dir": basedirs_idx,
@@ -574,6 +632,11 @@ def build_gvgai_rng_records(compiled, game_def, actions, seed=42):
                 if targets:
                     spawn_target_map[sd.type_idx] = targets[0]
 
+    # Build reverse spawn map: {target_type_idx: spawner_type_idx}
+    reverse_spawn_map = {}
+    for spawner_ti, target_ti in spawn_target_map.items():
+        reverse_spawn_map[target_ti] = spawner_ti
+
     state = compiled.init_state.replace(rng=jax.random.PRNGKey(seed))
     raw_states = [state]
     records = []
@@ -585,7 +648,8 @@ def build_gvgai_rng_records(compiled, game_def, actions, seed=42):
         state = compiled.step_fn(pre_state, action)
         raw_states.append(state)
         record = build_gvgai_rng_record(pre_state, state, game_def, block_size,
-                                        spawn_target_map=spawn_target_map)
+                                        spawn_target_map=spawn_target_map,
+                                        reverse_spawn_map=reverse_spawn_map)
         records.append(record)
 
     return records, raw_states

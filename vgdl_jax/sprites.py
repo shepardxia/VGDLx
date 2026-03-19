@@ -196,19 +196,27 @@ def _manhattan_distance_field(target_pos, target_alive, height, width, block_siz
 
 def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
                   fleeing=False, height=0, width=0, dist_field=None,
-                  block_size=1):
+                  block_size=1, target_always_alive=False):
     """Move toward (or away from) nearest target using grid distance field. O(H*W + N).
 
     In GVGAI, isFirstTick is cleared in updatePassive() but doesn't block the
     action (activeMovement still runs). We match this: first_tick sprites CAN
     move, but we clear the flag afterwards.
+
+    Args:
+        target_always_alive: True when the target is a static grid type whose
+            alive mask is empty (positions stored in static_grids, not arrays).
+            The precomputed dist_field is valid; skip the any_target_alive check.
     """
     rng, key = jax.random.split(state.rng)
 
     # Convert pixel positions to cells for distance field lookup
     chaser_cell = state.positions[type_idx] // block_size  # [max_n, 2] int32
-    target_alive = state.alive[target_type_idx]
-    any_target_alive = jnp.any(target_alive)
+    if target_always_alive:
+        any_target_alive = True  # Python True: compiled out at trace time
+    else:
+        target_alive = state.alive[target_type_idx]
+        any_target_alive = jnp.any(target_alive)
 
     # Distance field: [H, W] Manhattan distance to nearest alive target
     if dist_field is None:
@@ -290,7 +298,8 @@ def spawn_sprite(state: GameState, pos, target_type, orientation, speed):
 
 def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
                        target_type, target_orientation, target_speed,
-                       target_singleton=False, target_cons=0):
+                       target_singleton=False, target_cons=0,
+                       target_spawn_timers_init=0):
     """Conditionally spawn sprites — fully vectorized via prefix-sum slot allocation.
 
     Uses spawn_timers (not cooldown_timers) for spawn readiness checks, so
@@ -364,6 +373,18 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
             direction_ticks=state.direction_ticks.at[target_type].set(
                 jnp.where(should_fill, target_cons,
                            state.direction_ticks[target_type])))
+
+    # Set spawn_timers for spawned SpawnPoint/Bomber targets.
+    # In GVGAI, a newly-spawned Bomber sets start=gameTick, and
+    # (start+gameTick)%cd = (2*gameTick)%cd fires on spawn tick when
+    # gameTick is a multiple of cd/gcd(2,cd). For the common case
+    # (gameTick=0 or target created in a tick that's a multiple of cd),
+    # it fires immediately. We approximate by initializing spawn_timers=cd.
+    if target_spawn_timers_init > 0:
+        state = state.replace(
+            spawn_timers=state.spawn_timers.at[target_type].set(
+                jnp.where(should_fill, target_spawn_timers_init,
+                           state.spawn_timers[target_type])))
 
     # Update spawn counts — only for spawners that actually got a slot
     n_filled = should_fill.sum()

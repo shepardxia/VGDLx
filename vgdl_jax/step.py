@@ -119,7 +119,8 @@ def _pre_spawn(state, type_idx):
 def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                   chaser_target_set=frozenset(),
                   static_distance_fields=None,
-                  action_map=None):
+                  action_map=None,
+                  static_grid_map=None):
     """
     Build a jit-compiled step function from compiled game configuration.
 
@@ -132,6 +133,7 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
         chaser_target_set: frozenset of target type indices used by chasers/fleeing
         static_distance_fields: dict of target_idx → precomputed [H,W] distance field
         action_map: JAX int32 array mapping GVGAI action → internal action
+        static_grid_map: dict of type_idx → static_grid_idx (for static grid types)
 
     Returns:
         A function step(state, action) → state
@@ -141,6 +143,7 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
     height = params['height']
     width = params['width']
     block_size = params.get('block_size', 1)
+    _static_grid_map = static_grid_map or {}
 
     # Distance field caching
     _static_distance_fields = static_distance_fields or {}
@@ -166,7 +169,6 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
 
         # Save previous positions for stepBack / undoAll / bounceForward
         prev_positions = state.positions
-        prev_alive = state.alive  # Track which sprites are alive before NPC loop
 
         # 1. Avatar: preMovement then update (matching GVGAI tick() lines 1365-1371)
         for at in avatar_config.avatar_type_indices:
@@ -205,9 +207,29 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
         # Precompute distance fields — one per unique target, not per chaser type
         dist_fields = dict(_static_distance_fields)
         for target_idx in _dynamic_chaser_targets:
-            dist_fields[target_idx] = _manhattan_distance_field(
-                state.positions[target_idx], state.alive[target_idx],
-                height, width, block_size)
+            if target_idx in _static_grid_map:
+                # Static grid type: compute distance field from grid cells.
+                # Positions and alive arrays are empty for static types;
+                # use the static grid directly.
+                sg_idx = _static_grid_map[target_idx]
+                grid = state.static_grids[sg_idx]  # [H, W] bool
+                # Build distance field from grid: set distance=0 at occupied cells
+                INF_val = jnp.int32(height + width)
+                init_dist = jnp.where(grid, jnp.int32(0), INF_val)
+                def relax_grid(_, dist):
+                    padded = jnp.pad(dist, 1, mode='constant', constant_values=INF_val)
+                    up    = padded[:-2, 1:-1] + 1
+                    down  = padded[2:,  1:-1] + 1
+                    left  = padded[1:-1, :-2] + 1
+                    right = padded[1:-1, 2:]  + 1
+                    return jnp.minimum(dist, jnp.minimum(
+                        jnp.minimum(up, down), jnp.minimum(left, right)))
+                dist_fields[target_idx] = jax.lax.fori_loop(
+                    0, height + width, relax_grid, init_dist)
+            else:
+                dist_fields[target_idx] = _manhattan_distance_field(
+                    state.positions[target_idx], state.alive[target_idx],
+                    height, width, block_size)
 
         for type_idx in range(len(sprite_configs) - 1, -1, -1):
             cfg = sprite_configs[type_idx]
@@ -216,24 +238,34 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
             if cfg.sprite_class in STATIC_CLASSES:
                 continue
             state = _pre_movement(state, type_idx)
+            # GVGAI preMovement() saves lastrect AFTER incrementing lastmove
+            # but BEFORE update(). For newly-spawned sprites that will move on
+            # their spawn tick, this captures the spawn position so stepBack
+            # can revert to it correctly. Update prev_positions for alive
+            # sprites of this type to their current position (post-preMovement,
+            # pre-update).
+            prev_positions = prev_positions.at[type_idx].set(
+                jnp.where(state.alive[type_idx, :, None],
+                          state.positions[type_idx],
+                          prev_positions[type_idx]))
             if cfg.sprite_class in (SpriteClass.CHASER, SpriteClass.FLEEING):
+                target_idx = cfg.target_type_idx
                 state = update_chaser(
-                    state, type_idx, cfg.target_type_idx, cfg.cooldown,
+                    state, type_idx, target_idx, cfg.cooldown,
                     fleeing=(cfg.sprite_class == SpriteClass.FLEEING),
                     height=height, width=width,
-                    dist_field=dist_fields.get(cfg.target_type_idx),
-                    block_size=block_size)
+                    dist_field=dist_fields.get(target_idx),
+                    block_size=block_size,
+                    target_always_alive=(target_idx in _static_distance_fields
+                                         or target_idx in _static_grid_map))
             else:
                 state = _update_npc(state, type_idx, cfg, height, width,
                                     block_size=block_size)
 
-        # 3b. For newly spawned sprites (alive changed False→True during NPC loop),
-        # update prev_positions to their spawn position so step_back reverts to
-        # the spawn position, not (0,0). Non-spawned sprites keep their pre-movement
-        # prev_positions so step_back correctly reverts NPC movement.
-        newly_alive = state.alive & ~prev_alive
-        prev_positions = jnp.where(
-            newly_alive[:, :, None], state.positions, prev_positions)
+        # 3b. prev_positions for newly spawned sprites are already set correctly
+        # in the per-type preMovement update above — they capture the spawn position
+        # (after SpawnPoint creates the sprite, before its own update moves it),
+        # matching GVGAI's lastrect = new Rectangle(rect) in preMovement().
 
         # 4. Age non-Flicker sprites
         # Flicker-derived types (Flicker, OrientedFlicker, Spreader) handle their
@@ -905,7 +937,8 @@ def _npc_spawn_point(state, type_idx, cfg, height, width, block_size):
         target_orientation=jnp.array(cfg.target_orientation, dtype=jnp.float32),
         target_speed=cfg.target_speed,
         target_singleton=cfg.target_singleton,
-        target_cons=cfg.target_cons)
+        target_cons=cfg.target_cons,
+        target_spawn_timers_init=cfg.target_spawn_timers_init)
 
 
 def _npc_bomber(state, type_idx, cfg, height, width, block_size):

@@ -373,6 +373,7 @@ class SpriteDef:
     ammo_cost: int = 1                   # RC8: ammo consumed per shot
     rotate_in_place: bool = False        # RC2: OrientedAvatar rotateInPlace (default True for oriented avatars)
     spawn_orientation: Tuple[float, float] = (0.0, 0.0)  # SpawnPoint/Bomber: override orientation of spawned sprites
+    orientation_explicit: bool = False   # True if 'orientation' was set in VGDL definition
 
 
 @dataclass
@@ -489,3 +490,4 @@ class SpriteConfig:
     target_singleton: bool = False  # RC7: refuse to spawn if target already alive
     cons: int = 0  # RandomNPC: repeat same direction for N consecutive ticks
     target_cons: int = 0  # SpawnPoint/Bomber: cons value of target type (for RandomNPC targets)
+    target_spawn_timers_init: int = 0  # SpawnPoint/Bomber: init spawn_timers for spawned sprites (cd if target is SpawnPoint/Bomber)
