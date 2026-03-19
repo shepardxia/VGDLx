@@ -64,6 +64,8 @@ class SpriteClass(enum.IntEnum):
     AIMED_FLAK_AVATAR = 30
     SPREADER = 31
     WALK_JUMPER = 32
+    DOOR = 33
+    MISSILE_AVATAR = 34
 
 
 class TerminationType(enum.IntEnum):
@@ -210,6 +212,10 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         is_moving_npc=True,
         physics_type=PHYSICS_GRAVITY,
     ),
+    SpriteClass.DOOR: SpriteClassDef(
+        vgdl_names=('Door',),
+        is_static=True,
+    ),
 
     # --- Avatar classes ---
     SpriteClass.MOVING_AVATAR: SpriteClassDef(
@@ -310,6 +316,14 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
         n_move_actions=4, can_shoot=True, is_aimed=True, can_move_aimed=True,
         is_oriented=True,
         gvgai_actions=('ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_USE', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
+    ),
+    SpriteClass.MISSILE_AVATAR: SpriteClassDef(
+        vgdl_names=('MissileAvatar',),
+        is_avatar=True,
+        is_oriented=True,
+        default_speed=1.0,
+        n_move_actions=4,
+        gvgai_actions=('ACTION_LEFT', 'ACTION_RIGHT', 'ACTION_DOWN', 'ACTION_UP', 'ACTION_NIL'),
     ),
 }
 
@@ -470,6 +484,7 @@ class AvatarConfig:
     ammo_cost: int = 1            # Ammo consumed per shot
     rotate_in_place: bool = False  # OrientedAvatar rotateInPlace — rotate first, then move
     projectile_offset: bool = False  # ShootAvatar spawns projectile one cell ahead
+    is_missile_avatar: bool = False  # MissileAvatar: auto-moves in orientation, ignores input
 
 
 @dataclass

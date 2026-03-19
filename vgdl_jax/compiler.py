@@ -235,6 +235,7 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
         ammo_cost=ammo_cost,
         rotate_in_place=avatar_sd.rotate_in_place,
         projectile_offset=projectile_offset,
+        is_missile_avatar=(avatar_sd.sprite_class == SpriteClass.MISSILE_AVATAR),
     )
     return avatar_config, n_move
 

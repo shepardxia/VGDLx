@@ -115,9 +115,16 @@ class Node:
         return self
 
 
-def indent_tree_parser(s, tabsize=8):
-    """Parse an indented string into a tree of Nodes."""
-    s = s.expandtabs(tabsize)
+def indent_tree_parser(s):
+    """Parse an indented string into a tree of Nodes.
+
+    Indent is computed as raw character offset (tab counts as 1 char),
+    matching GVGAI's VGDLParser.indentTreeParser which uses
+    ``line.indexOf(firstChar)`` on the unmodified string.
+    """
+    # Do NOT expandtabs — tab-stop expansion can collapse distinct indent
+    # levels (e.g. ``\\t`` and ``    \\t`` both expand to column 8 with
+    # tabsize=8). GVGAI counts each character literally, so we do the same.
     s = s.replace('(', ' ').replace(')', ' ').replace(',', ' ')
     last = Node("", -1)
     for line in s.split("\n"):

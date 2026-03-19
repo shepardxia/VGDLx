@@ -4,7 +4,7 @@ effects, and termination checks into a single state → state transition.
 
 Collision detection uses occupancy grids [height, width] for O(max_n) checks
 instead of O(max_n²) pairwise comparisons. Effects are applied via boolean
-masks over the sprite arrays (see effects.py for all 37 effect handlers).
+masks over the sprite arrays (see effects.py for effect handlers).
 
 All positions are int32 pixel coordinates. Collision grids are at cell
 resolution (pos // block_size). For sprites that can be mid-cell (fractional
@@ -23,6 +23,7 @@ from vgdl_jax.sprites import (
     update_random_inertial, update_spreader, update_chaser,
     update_spawn_point, update_walk_jumper,
     _manhattan_distance_field, _relax_distance_field, flicker_age,
+    _move_with_cooldown, _apply_npc_move,
 )
 from vgdl_jax.terminations import check_all_terminations
 
@@ -190,6 +191,9 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                 jump_strength=avatar_config.jump_strength,
                 gravity=avatar_config.gravity,
                 airsteering=avatar_config.airsteering)
+        elif avatar_config.is_missile_avatar:
+            state = _update_missile_avatar(state, action, avatar_config, height, width,
+                                            block_size=block_size)
         elif avatar_config.is_aimed:
             state = _update_aimed_avatar(state, action, avatar_config, height, width,
                                          block_size=block_size)
@@ -778,6 +782,24 @@ def _shoot(state, action, cfg, avatar_type, block_size=1):
 
     # Subtract ammo cost after shooting
     state = _subtract_ammo(state, is_shoot, avatar_type, cfg)
+    return state
+
+
+def _update_missile_avatar(state, action, cfg, height, width, block_size=1):
+    """Update MissileAvatar: ignores player input, auto-moves in orientation direction.
+
+    GVGAI MissileAvatar.updateAvatar() calls requestPlayerInput() (but discards
+    the result), then super.updatePassive() which does physics.passiveMovement —
+    i.e., moves in the current orientation direction every tick subject to cooldown
+    and isFirstTick. Player actions have no effect.
+    """
+    for at in cfg.avatar_type_indices:
+        cooldown = cfg.cooldown
+        # Auto-move in orientation direction (like update_missile)
+        new_pos, new_timers, _, first_tick = _move_with_cooldown(
+            state, at, cooldown)
+        state = _apply_npc_move(state, at, new_pos, new_timers,
+                                first_tick_mask=first_tick)
     return state
 
 

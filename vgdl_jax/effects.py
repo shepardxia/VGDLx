@@ -307,6 +307,108 @@ def kill_if_avatar_without_resource(state, type_a, mask, score_change, kwargs, *
                        should_kill.sum() * jnp.int32(score_change))
 
 
+def kill_all(state, type_a, mask, score_delta, kwargs, **_):
+    """Kill all sprites of the target type when any collision occurs."""
+    kill_type = kwargs.get('kill_type_idx', -1)
+    if kill_type >= 0:
+        all_mask = jnp.broadcast_to(mask.any(), state.alive[kill_type].shape)
+        state = prim_kill(state, kill_type, all_mask)
+    return _with_score(state, score_delta)
+
+
+def kill_if_frontal(state, prev_positions, type_a, type_b, mask, score_change,
+                    partner_idx=None, **_):
+    """Kill sprite1 if sprites are moving in opposite directions (or sprite1 is static)."""
+    if type_b >= 0 and partner_idx is not None:
+        # sprite1's last direction (current - prev), normalized to sign
+        delta_a = (state.positions[type_a] - prev_positions[type_a]).astype(jnp.float32)
+        norm_a = jnp.sqrt(jnp.sum(delta_a ** 2, axis=-1, keepdims=True))
+        dir_a = jnp.where(norm_a > 0.5, delta_a / norm_a, 0.0)
+        # partner's last direction
+        partner_delta = _partner_vals(
+            (state.positions[type_b] - prev_positions[type_b]).astype(jnp.float32),
+            partner_idx)
+        norm_b = jnp.sqrt(jnp.sum(partner_delta ** 2, axis=-1, keepdims=True))
+        dir_b = jnp.where(norm_b > 0.5, partner_delta / norm_b, 0.0)
+        # Sum of normalized directions — if (0,0) they are opposite
+        sum_dir = dir_a + dir_b
+        sum_mag = jnp.sqrt(jnp.sum(sum_dir ** 2, axis=-1))
+        a_is_static = (norm_a[:, 0] < 0.5)
+        # Kill if sprite1 is static OR directions are opposite (sum near zero)
+        should_kill = mask & (partner_idx >= 0) & (a_is_static | (sum_mag < 0.5))
+    else:
+        should_kill = jnp.zeros_like(mask)
+    return _with_score(prim_kill(state, type_a, should_kill),
+                       should_kill.sum() * jnp.int32(score_change))
+
+
+def kill_if_not_frontal(state, prev_positions, type_a, type_b, mask, score_change,
+                        partner_idx=None, **_):
+    """Kill sprite1 if sprites are NOT moving in opposite directions (or sprite1 is static)."""
+    if type_b >= 0 and partner_idx is not None:
+        delta_a = (state.positions[type_a] - prev_positions[type_a]).astype(jnp.float32)
+        norm_a = jnp.sqrt(jnp.sum(delta_a ** 2, axis=-1, keepdims=True))
+        dir_a = jnp.where(norm_a > 0.5, delta_a / norm_a, 0.0)
+        partner_delta = _partner_vals(
+            (state.positions[type_b] - prev_positions[type_b]).astype(jnp.float32),
+            partner_idx)
+        norm_b = jnp.sqrt(jnp.sum(partner_delta ** 2, axis=-1, keepdims=True))
+        dir_b = jnp.where(norm_b > 0.5, partner_delta / norm_b, 0.0)
+        sum_dir = dir_a + dir_b
+        sum_mag = jnp.sqrt(jnp.sum(sum_dir ** 2, axis=-1))
+        a_is_static = (norm_a[:, 0] < 0.5)
+        # Kill if sprite1 is static OR directions are NOT opposite (sum NOT near zero)
+        should_kill = mask & (partner_idx >= 0) & (a_is_static | (sum_mag >= 0.5))
+    else:
+        should_kill = jnp.zeros_like(mask)
+    return _with_score(prim_kill(state, type_a, should_kill),
+                       should_kill.sum() * jnp.int32(score_change))
+
+
+def transform_to_singleton(state, type_a, mask, score_delta, kwargs, **_):
+    """Like transformTo, but first transforms existing sprites of target type to stype_other,
+    then transforms sprite1 to stype. Only executes if collision occurs."""
+    new_type = kwargs['new_type_idx']
+    other_type = kwargs.get('other_type_idx', -1)
+    target_speed = kwargs.get('target_speed', None)
+    target_cons = kwargs.get('target_cons', 0)
+    target_spawn_cd = kwargs.get('target_spawn_cd', 0)
+    copy_ori = kwargs.get('copy_orientation', True)
+    other_speed = kwargs.get('other_speed', None)
+    other_cons = kwargs.get('other_cons', 0)
+
+    any_collision = mask.any()
+
+    # Step 1: Transform existing sprites of new_type back to other_type
+    if other_type >= 0:
+        existing_alive = state.alive[new_type] & any_collision
+        kill_all = jnp.broadcast_to(any_collision, state.alive[new_type].shape)
+        state = prim_kill(state, new_type, kill_all)
+        state = _fill_slots(state, other_type, existing_alive,
+                            state.positions[new_type],
+                            state.orientations[new_type],
+                            target_speed=other_speed, reset_cooldown=True,
+                            src_resources=state.resources[new_type],
+                            target_cons=other_cons)
+
+    # Step 2: Transform sprite1 to new_type (same as normal transformTo)
+    if copy_ori:
+        orientations = state.orientations[type_a]
+    else:
+        default_ori = kwargs.get('default_orientation', (0.0, 1.0))
+        orientations = jnp.broadcast_to(
+            jnp.array(default_ori, dtype=jnp.float32),
+            state.orientations[type_a].shape)
+    state = prim_kill(state, type_a, mask)
+    state = _fill_slots(state, new_type, mask,
+                        state.positions[type_a], orientations,
+                        target_speed=target_speed, reset_cooldown=True,
+                        src_resources=state.resources[type_a],
+                        target_cons=target_cons,
+                        target_spawn_cd=target_spawn_cd)
+    return _with_score(state, score_delta)
+
+
 def kill_if_alive(state, type_a, type_b, mask, score_change,
                   partner_idx=None, **_):
     """Kill sprite1 only if partner sprite2 is still alive."""
@@ -492,6 +594,20 @@ def clone_sprite(state, type_a, mask, score_delta, kwargs=None, **_):
     return _with_score(state, score_delta)
 
 
+def spawn(state, type_a, mask, score_delta, kwargs, **_):
+    spawn_type = kwargs.get('spawn_type_idx', -1)
+    target_speed = kwargs.get('target_speed', None)
+    target_cons = kwargs.get('target_cons', 0)
+    target_spawn_cd = kwargs.get('target_spawn_cd', 0)
+    if spawn_type >= 0:
+        state = _fill_slots(state, spawn_type, mask,
+                            state.positions[type_a],
+                            target_speed=target_speed, reset_cooldown=True,
+                            target_cons=target_cons,
+                            target_spawn_cd=target_spawn_cd)
+    return _with_score(state, score_delta)
+
+
 def spawn_if_has_more(state, type_a, mask, score_delta, kwargs, **_):
     r_idx = kwargs.get('resource_idx', 0)
     limit = kwargs.get('limit', 0)
@@ -502,6 +618,23 @@ def spawn_if_has_more(state, type_a, mask, score_delta, kwargs, **_):
     if spawn_type >= 0:
         has_enough = mask & (state.resources[type_a, :, r_idx] >= limit)
         state = _fill_slots(state, spawn_type, has_enough,
+                            state.positions[type_a],
+                            target_speed=target_speed, reset_cooldown=True,
+                            target_cons=target_cons,
+                            target_spawn_cd=target_spawn_cd)
+    return _with_score(state, score_delta)
+
+
+def spawn_if_has_less(state, type_a, mask, score_delta, kwargs, **_):
+    r_idx = kwargs.get('resource_idx', 0)
+    limit = kwargs.get('limit', 0)
+    spawn_type = kwargs.get('spawn_type_idx', -1)
+    target_speed = kwargs.get('target_speed', None)
+    target_cons = kwargs.get('target_cons', 0)
+    target_spawn_cd = kwargs.get('target_spawn_cd', 0)
+    if spawn_type >= 0:
+        has_less = mask & (state.resources[type_a, :, r_idx] <= limit)
+        state = _fill_slots(state, spawn_type, has_less,
                             state.positions[type_a],
                             target_speed=target_speed, reset_cooldown=True,
                             target_cons=target_cons,
@@ -962,6 +1095,15 @@ def _ckw_spawn_if_has_more(ed, ctx):
         _add_spawn_kwargs(kwargs, sd, ctx.block_size)
     return kwargs
 
+def _ckw_spawn(ed, ctx):
+    kwargs = {}
+    idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('stype', ''))
+    if idx is not None:
+        sd = ctx.game_def.sprites[idx]
+        kwargs['spawn_type_idx'] = idx
+        _add_spawn_kwargs(kwargs, sd, ctx.block_size)
+    return kwargs
+
 def _ckw_prob_half(ed, ctx):
     return {'prob': float(ed.kwargs.get('prob', 0.5))}
 
@@ -989,6 +1131,43 @@ def _ckw_kill_others(ed, ctx):
     if idx is not None:
         return {'kill_type_idx': idx}
     return {}
+
+def _ckw_kill_all(ed, ctx):
+    idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('stype', ed.kwargs.get('target', '')))
+    if idx is not None:
+        return {'kill_type_idx': idx}
+    return {}
+
+def _ckw_transform_to_singleton(ed, ctx):
+    """Compile kwargs for transformToSingleton: resolve stype (new type) and stype_other."""
+    from vgdl_jax.data_model import SPRITE_REGISTRY
+    kwargs = {}
+    # stype: the new type to transform sprite1 into
+    idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('stype', ''))
+    if idx is not None:
+        src_def = ctx.game_def.sprites[ctx.concrete_actor_idx] if ctx.concrete_actor_idx is not None else None
+        dst_def = ctx.game_def.sprites[idx]
+        src_oriented = SPRITE_REGISTRY.get(src_def.sprite_class, None) if src_def else None
+        dst_oriented = SPRITE_REGISTRY.get(dst_def.sprite_class, None)
+        dst_ori_is_dnone = (dst_def.orientation == (0.0, 0.0))
+        copy_ori = (
+            (src_oriented is not None and src_oriented.is_oriented) and
+            (dst_oriented is not None and dst_oriented.is_oriented) and
+            dst_ori_is_dnone)
+        kwargs['new_type_idx'] = idx
+        kwargs['copy_orientation'] = copy_ori
+        _add_spawn_kwargs(kwargs, dst_def, ctx.block_size)
+        if not copy_ori:
+            kwargs['default_orientation'] = dst_def.orientation
+    # stype_other: existing sprites of stype are transformed to this type
+    other_idx = ctx.resolve_first(ctx.game_def, ed.kwargs.get('stype_other', ''))
+    if other_idx is not None:
+        kwargs['other_type_idx'] = other_idx
+        other_def = ctx.game_def.sprites[other_idx]
+        kwargs['other_speed'] = speed_to_pixels(other_def.speed, ctx.block_size, other_def.physics_type)
+        if other_def.sprite_class == SpriteClass.RANDOM_NPC and other_def.cons > 0:
+            kwargs['other_cons'] = other_def.cons
+    return kwargs
 
 def _ckw_kill_if_avatar_without_resource(ed, ctx):
     res_name = ed.kwargs.get('resource', ed.kwargs.get('target', ''))
@@ -1186,13 +1365,25 @@ EFFECT_REGISTRY = {
     'KillIfAvatarWithoutResource': EffectEntry(kill_if_avatar_without_resource, 'kill_if_avatar_without_resource',
         modifies_alive=True, static_a_handler=_static_kill_if_avatar_without_resource,
         compile_kwargs=_ckw_kill_if_avatar_without_resource),
+    'killAll':           EffectEntry(kill_all, 'kill_all',
+        modifies_alive=True, compile_kwargs=_ckw_kill_all),
+    'killIfFrontal':     EffectEntry(kill_if_frontal, 'kill_if_frontal',
+        needs_partner=True, modifies_alive=True),
+    'killIfNotFrontal':  EffectEntry(kill_if_not_frontal, 'kill_if_not_frontal',
+        needs_partner=True, modifies_alive=True),
     # Spawn and transform
     'transformTo':       EffectEntry(transform_to, 'transform_to',
         modifies_alive=True, compile_kwargs=_ckw_transform_to),
+    'transformToSingleton': EffectEntry(transform_to_singleton, 'transform_to_singleton',
+        modifies_alive=True, compile_kwargs=_ckw_transform_to_singleton),
     'cloneSprite':       EffectEntry(clone_sprite, 'clone_sprite',
         modifies_alive=True, compile_kwargs=_ckw_clone_sprite),
+    'spawn':             EffectEntry(spawn, 'spawn',
+        modifies_alive=True, compile_kwargs=_ckw_spawn),
     'spawnIfHasMore':    EffectEntry(spawn_if_has_more, 'spawn_if_has_more',
         modifies_alive=True, compile_kwargs=_ckw_spawn_if_has_more),
+    'spawnIfHasLess':    EffectEntry(spawn_if_has_less, 'spawn_if_has_less',
+        modifies_alive=True, compile_kwargs=_ckw_spawn_if_has_more),  # same kwargs pattern
     'TransformOthersTo': EffectEntry(transform_others_to, 'transform_others_to',
         compile_kwargs=_ckw_transform_others_to),
     # Movement and conveying
