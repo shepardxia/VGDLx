@@ -64,23 +64,7 @@ Not implemented in VGDLx:
 
 ## GVGAI Cross-Engine Validation (42 supported games, 40 steps)
 
-**29 exact match**: aliens, avoidgeorge, bait, brainman, chainreaction, chase, chipschallenge, clusters, cookmepasta, eggomania, factorymanager, flower, islands, jaws, missilecommand, modality, portals, realsokoban, rivers, shipwreck, sokoban, superman, surround, tercio, thecitadel, thesnowman, waitforbreakfast, waves, wrapsokoban
-
-**3 RNG consumption order**: butterflies, chopper, infection — reverse NPC loop produces different RNG sequences than GVGAI's per-sprite iteration within type lists. Known limitation.
-
-**3 spawn/RNG timing**: defender, ikaruga, whackamole — stochastic spawn timing offset produces different RNG roll outcomes.
-
-**2 spawn position (prev_positions)**: angelsdemons, wildgunman — spawned sprites still teleport to (0,0) after step_back. prev_positions fix applied but may need further investigation.
-
-**1 Spreader not fully implemented**: glow — noop matches, random fails. Spark (Spreader) dies before spreading due to remaining Flicker interaction.
-
-**1 EOS/turnAround**: myAliens — EOS rect fix applied but turnAround implementation may diverge from GVGAI's `activeMovement(DDOWN)` chain.
-
-**1 spawnorientation/RNG**: sheriff — spawnorientation fix applied but remaining divergence.
-
-**1 block_size/misc**: assemblyline — possible block_size mismatch or prev_positions issue.
-
-**1 spawn timing**: plaqueattack — spawn timing + prev_positions interaction.
+**42/42 exact match.** All supported games pass validation.
 
 ## Coverage (VGDLx / GVGAI)
 

@@ -193,7 +193,7 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
                 proj_ori_from_avatar = False
         shoot_action_idx = n_move + 1
 
-    # RC8: ammo resource lookup for FlakAvatar / AimedFlakAvatar
+    # Ammo resource lookup for FlakAvatar / AimedFlakAvatar
     ammo_resource_idx = -1
     min_ammo = -1
     ammo_cost = 1
@@ -202,7 +202,7 @@ def _build_avatar_config(avatar_sd, game_def, block_size, avatar_type_indices=()
         min_ammo = avatar_sd.min_ammo
         ammo_cost = avatar_sd.ammo_cost
 
-    # RC4: projectile_offset — ShootAvatar/ShootEverywhereAvatar spawn one cell ahead
+    # projectile_offset — ShootAvatar/ShootEverywhereAvatar spawn one cell ahead
     projectile_offset = sc_def.projectile_offset
 
     avatar_config = AvatarConfig(
@@ -325,7 +325,7 @@ def _build_sprite_configs(game_def, block_size):
             cfg.total = sd.spawner_total
             # Both SpawnPoint and Bomber use spawn_cooldown for spawn timing
             cfg.spawn_cooldown = cfg.cooldown
-            # RC7: singleton check — refuse to spawn if target already alive
+            # Singleton check — refuse to spawn if target already alive
             if target_idx >= 0:
                 cfg.target_singleton = game_def.sprites[target_idx].singleton
                 target_sd = game_def.sprites[target_idx]

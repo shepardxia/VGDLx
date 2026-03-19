@@ -105,7 +105,7 @@ def _pre_movement(state, type_idx):
 def _pre_spawn(state, type_idx):
     """Increment spawn_timers for SpawnPoint/Bomber types.
 
-    Spawn timing is independent of movement timing (RC3). In GVGAI, spawn
+    Spawn timing is independent of movement timing. In GVGAI, spawn
     readiness uses (start+gameTick)%cooldown while movement uses lastmove —
     two independent systems.
     """
@@ -739,7 +739,7 @@ def _shoot(state, action, cfg, avatar_type, block_size=1):
     if cfg.projectile_singleton:
         is_shoot = is_shoot & ~jnp.any(state.alive[proj_type])
 
-    # RC8: ammo check
+    # Ammo check
     has_ammo = _check_ammo(state, avatar_type, cfg)
     is_shoot = is_shoot & has_ammo
 
@@ -762,7 +762,7 @@ def _shoot(state, action, cfg, avatar_type, block_size=1):
             proj_ori = jnp.array(cfg.projectile_default_orientation,
                                   dtype=jnp.float32)
 
-        # RC4: ShootAvatar spawns projectile one cell ahead
+        # ShootAvatar spawns projectile one cell ahead
         if cfg.projectile_offset:
             proj_pos = state.positions[avatar_type, 0] + \
                 state.orientations[avatar_type, 0].astype(jnp.int32) * block_size
@@ -776,7 +776,7 @@ def _shoot(state, action, cfg, avatar_type, block_size=1):
             state,
         )
 
-    # RC8: subtract ammo cost after shooting
+    # Subtract ammo cost after shooting
     state = _subtract_ammo(state, is_shoot, avatar_type, cfg)
     return state
 
@@ -799,7 +799,7 @@ def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_
     is_alive = state.alive[avatar_type, 0]
 
     if cfg.rotate_in_place:
-        # RC2: GVGAI OrientedAvatar rotateInPlace semantics.
+        # GVGAI OrientedAvatar rotateInPlace semantics.
         # If action direction differs from current orientation: rotate only (no move).
         # If action direction matches current orientation: move normally.
         cur_ori_int = state.orientations[avatar_type, 0].astype(jnp.int32)
@@ -822,7 +822,7 @@ def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_
             state.cooldown_timers),
     )
 
-    # Update orientation on rotate (RC2: any directional input; non-RC2: only on move)
+    # Update orientation on rotate (rotateInPlace: any directional input; otherwise: only on move)
     new_ori = jax.lax.cond(
         should_rotate,
         lambda: DIRECTION_DELTAS_F32[move_idx],
@@ -965,7 +965,7 @@ def _npc_spawn_point(state, type_idx, cfg, height, width, block_size):
 
 def _npc_bomber(state, type_idx, cfg, height, width, block_size):
     # GVGAI SpawnPoint.update(): spawn first, then super.update() does movement
-    # spawn_timers and cooldown_timers are independent (RC3)
+    # spawn_timers and cooldown_timers are independent
     state = _npc_spawn_point(state, type_idx, cfg, height, width, block_size)
     return update_missile(state, type_idx, cfg.cooldown)
 

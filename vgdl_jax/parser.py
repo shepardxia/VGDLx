@@ -353,14 +353,14 @@ def _build_sprite_def(key, class_name, args, stypes, type_idx):
     angle_diff = float(args.get('angle_diff', 0.05))
     cons = int(args.get('cons', 0))
 
-    # RC8: FlakAvatar ammo fields
+    # FlakAvatar ammo fields
     ammo = args.get('ammo', None)
     if ammo is not None:
         ammo = str(ammo)
     min_ammo = int(args.get('minAmmo', -1))
     ammo_cost = int(args.get('ammoCost', 1))
 
-    # RC2: rotateInPlace — OrientedAvatar subclasses default to True
+    # rotateInPlace — OrientedAvatar subclasses default to True
     rotate_in_place_default = SPRITE_REGISTRY[sc].rotate_in_place_default
     rotate_in_place = bool(args.get('rotateInPlace', rotate_in_place_default))
 

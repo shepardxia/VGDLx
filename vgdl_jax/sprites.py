@@ -322,7 +322,7 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     """Conditionally spawn sprites — fully vectorized via prefix-sum slot allocation.
 
     Uses spawn_timers (not cooldown_timers) for spawn readiness checks, so
-    spawning and movement timing are fully independent (RC3).
+    spawning and movement timing are fully independent.
 
     Spawned sprites get cooldown_timers=0, is_first_tick=True. The reverse NPC
     loop in step.py gives them per-type preMovement (0→1) then update
@@ -354,7 +354,7 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     rand_ok = jax.random.uniform(key, (max_n,)) < prob
     should_spawn = is_alive & timer_ready & under_total & rand_ok
 
-    # RC7: singleton check — refuse to spawn if target type already has an alive sprite
+    # Singleton check — refuse to spawn if target type already has an alive sprite
     if target_singleton:
         target_has_none = ~jnp.any(state.alive[target_type])
         should_spawn = should_spawn & target_has_none
