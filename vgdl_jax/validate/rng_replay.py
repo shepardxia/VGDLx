@@ -422,6 +422,8 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
     pre_alive = np.array(pre_state.alive)
     pre_pos = np.array(pre_state.positions)
     post_pos = np.array(post_state.positions)
+    pre_spawn_counts = np.array(pre_state.spawn_counts)
+    post_spawn_counts = np.array(post_state.spawn_counts)
     post_ori = np.array(post_state.orientations)
     post_alive = np.array(post_state.alive)
     post_speeds = np.array(post_state.speeds)
@@ -444,10 +446,12 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
             all_slots = np.where(alive_mask | newly_alive_mask)[0]
             if len(all_slots) == 0:
                 continue
-            # RandomNPC entries use consume-and-remove to handle position overlap
-            # (e.g. after cloneSprite or when two RandomNPCs move to the same cell).
-            # Chaser/Fleeing don't need this since their directions are deterministic.
-            use_consume = (sc == SpriteClass.RANDOM_NPC)
+            # RandomNPC entries always use consume-and-remove.
+            # Chaser/Fleeing entries use consume only when multiple sprites
+            # share the same position (e.g. two Chasers on the same cell get
+            # different Gumbel tie-breaking results in VGDLx). Without consume,
+            # GVGAI's lookup returns the first matching entry for both sprites.
+            use_consume_all = (sc == SpriteClass.RANDOM_NPC)
 
             # Build a lookup for spawner positions → newly spawned sprite positions.
             # For each newly-alive slot, find the spawner whose position matches.
@@ -471,6 +475,8 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
                     if best_spawner_pos is not None:
                         spawn_positions[ns] = best_spawner_pos
 
+            # First pass: collect entry positions to detect duplicates
+            entry_positions = []
             entries = []
             for slot in all_slots:
                 ori_r, ori_c = post_ori[ti, slot, 0], post_ori[ti, slot, 1]
@@ -488,13 +494,21 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
                         speed_px = int(post_speeds[ti, slot])
                         r = float(post_pos[ti, slot, 0]) - round(float(ori_r)) * speed_px
                         c = float(post_pos[ti, slot, 1]) - round(float(ori_c)) * speed_px
+                pos_key = (float(r), float(c))
+                entry_positions.append(pos_key)
                 entry = {
                     "pos": [float(r), float(c)],  # already in pixels
                     "dir": basedirs_idx,
                 }
-                if use_consume:
-                    entry["consume"] = True
                 entries.append(entry)
+
+            # Detect duplicate positions — enable consume for overlapping entries
+            from collections import Counter
+            pos_counts = Counter(entry_positions)
+            has_duplicates = any(v > 1 for v in pos_counts.values())
+            for i, entry in enumerate(entries):
+                if use_consume_all or (has_duplicates and pos_counts[entry_positions[i]] > 1):
+                    entry["consume"] = True
             record[sd.key] = entries
 
         # Spawn-consuming types
@@ -559,6 +573,11 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
                     did_spawn = bool(np.any(dists < block_size))
                 else:
                     did_spawn = False
+                # Also check spawn_counts: if the spawner's count increased,
+                # it definitely spawned (catches same-tick spawn-and-kill where
+                # the target dies before post_state and isn't visible in alive diffs).
+                if not did_spawn and pre_alive[ti][slot]:
+                    did_spawn = bool(post_spawn_counts[ti, slot] > pre_spawn_counts[ti, slot])
                 roll = 0.0 if did_spawn else 1.0
                 entries.append({
                     "pos": [float(spawner_pos[0]), float(spawner_pos[1])],
