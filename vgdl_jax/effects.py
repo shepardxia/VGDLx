@@ -133,7 +133,7 @@ def _nearest_partner(pos_a, state, type_b, eff_b):
 
 def _fill_slots(state, target_type, source_mask, src_positions,
                 src_orientations=None, target_speed=None, reset_cooldown=False,
-                src_resources=None, target_cons=0):
+                src_resources=None, target_cons=0, target_spawn_cd=0):
     """Allocate dead slots in target_type and fill with source data.
 
     Effect-spawned sprites get is_first_tick=True and cooldown_timers=0.
@@ -144,6 +144,12 @@ def _fill_slots(state, target_type, source_mask, src_positions,
         newly filled slots. Matches GVGAI's addSprite() which creates from
         template with counter=0, prevAction=DNONE — the first `cons` calls
         to getRandomMove() produce DNONE (no movement).
+
+    target_spawn_cd: if > 0, the target is a SpawnPoint/Bomber. Initialize
+        spawn_timers based on step_count to match GVGAI's (start+gameTick)%cd
+        formula. Effects run after the NPC loop, so the spawned sprite's first
+        update is on the NEXT tick (step_count+1). start = step_count+1 in
+        GVGAI terms, so first fire iff (2*(step_count+1))%cd == 0.
     """
     should_fill, src_idx = prefix_sum_allocate(state.alive[target_type], source_mask)
     src_pos = src_positions[src_idx]
@@ -185,6 +191,17 @@ def _fill_slots(state, target_type, source_mask, src_positions,
         state = state.replace(
             resources=state.resources.at[target_type].set(
                 jnp.where(should_fill[:, None], src_res, state.resources[target_type])))
+    if target_spawn_cd > 0:
+        # GVGAI: effect-spawned Bomber/SpawnPoint gets start=-1 (loadDefaults).
+        # First update at step_count+1 sets start=step_count+1.
+        # Fire when (2*(step_count+1))%cd == 0.
+        # Init: cd - 1 - ((2*(step_count+1)) % cd)
+        next_tick = state.step_count + 1
+        init_val = target_spawn_cd - 1 - ((2 * next_tick) % target_spawn_cd)
+        state = state.replace(
+            spawn_timers=state.spawn_timers.at[target_type].set(
+                jnp.where(should_fill, init_val,
+                           state.spawn_timers[target_type])))
     return state
 
 
@@ -445,6 +462,7 @@ def transform_to(state, type_a, mask, score_delta, kwargs, **_):
     new_type = kwargs['new_type_idx']
     target_speed = kwargs.get('target_speed', None)
     target_cons = kwargs.get('target_cons', 0)
+    target_spawn_cd = kwargs.get('target_spawn_cd', 0)
     copy_ori = kwargs.get('copy_orientation', True)
     if copy_ori:
         orientations = state.orientations[type_a]
@@ -458,16 +476,19 @@ def transform_to(state, type_a, mask, score_delta, kwargs, **_):
                        state.positions[type_a], orientations,
                        target_speed=target_speed, reset_cooldown=True,
                        src_resources=state.resources[type_a],
-                       target_cons=target_cons)
+                       target_cons=target_cons,
+                       target_spawn_cd=target_spawn_cd)
 
 
 def clone_sprite(state, type_a, mask, score_delta, kwargs=None, **_):
     target_speed = kwargs.get('target_speed', None) if kwargs else None
     target_cons = kwargs.get('target_cons', 0) if kwargs else 0
+    target_spawn_cd = kwargs.get('target_spawn_cd', 0) if kwargs else 0
     state = _fill_slots(state, type_a, mask,
                         state.positions[type_a], state.orientations[type_a],
                         target_speed=target_speed, reset_cooldown=True,
-                        target_cons=target_cons)
+                        target_cons=target_cons,
+                        target_spawn_cd=target_spawn_cd)
     return _with_score(state, score_delta)
 
 
@@ -477,12 +498,14 @@ def spawn_if_has_more(state, type_a, mask, score_delta, kwargs, **_):
     spawn_type = kwargs.get('spawn_type_idx', -1)
     target_speed = kwargs.get('target_speed', None)
     target_cons = kwargs.get('target_cons', 0)
+    target_spawn_cd = kwargs.get('target_spawn_cd', 0)
     if spawn_type >= 0:
         has_enough = mask & (state.resources[type_a, :, r_idx] >= limit)
         state = _fill_slots(state, spawn_type, has_enough,
                             state.positions[type_a],
                             target_speed=target_speed, reset_cooldown=True,
-                            target_cons=target_cons)
+                            target_cons=target_cons,
+                            target_spawn_cd=target_spawn_cd)
     return _with_score(state, score_delta)
 
 
@@ -832,10 +855,12 @@ def null(state, score_delta, **_):
 
 
 def _add_spawn_kwargs(kwargs, sd, block_size):
-    """Add target_speed and target_cons to effect kwargs for a spawn target."""
+    """Add target_speed, target_cons, and target_spawn_cd to effect kwargs for a spawn target."""
     kwargs['target_speed'] = speed_to_pixels(sd.speed, block_size, sd.physics_type)
     if sd.sprite_class == SpriteClass.RANDOM_NPC and sd.cons > 0:
         kwargs['target_cons'] = sd.cons
+    if sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
+        kwargs['target_spawn_cd'] = max(sd.cooldown, 1)
 
 
 # ── Compile-time kwargs ────────────────────────────────────────────

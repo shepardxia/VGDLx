@@ -576,7 +576,19 @@ def _collision_grid_mask_static_a(state, static_grid, type_b,
 
 def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
                        block_size, cache_safe_type_b=frozenset()):
-    """Apply all effects using collision detection and mask operations."""
+    """Apply all effects using collision detection and mask operations.
+
+    GVGAI deferred kills: sprites killed during eventHandling() are added to
+    kill_list but remain alive until clearAll(). This means killed sprites can
+    still participate as actees in subsequent collision checks within the same
+    step. We match this by snapshotting alive before effects and using the
+    snapshot for collision detection, while allowing effects to modify alive
+    normally for spawn slot allocation.
+    """
+    # Snapshot alive state for collision detection (GVGAI deferred kills).
+    # Effects modify state.alive (kills, spawns), but collision detection
+    # uses this snapshot so killed sprites remain visible as actees.
+    coll_alive = state.alive
     once_guard = {}
     grid_cache = {}
     for eff in effects:
@@ -589,10 +601,22 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
         static_a_idx = eff.static_a_grid_idx
         static_b_idx = eff.static_b_grid_idx
 
+        # Build collision state: current positions, union of pre-effect and
+        # current alive. GVGAI's eventHandling doesn't check actees against
+        # kill_list, so killed sprites are still visible. And sprites spawned
+        # by earlier effects (e.g., transformTo) are also in the sprite group.
+        # The union ensures both are visible for collision detection.
+        # The actor filter (coll_mask & state.alive[type_a]) then removes
+        # killed actors, matching GVGAI's kill_list.contains(s1) check.
+        union_alive = coll_alive | state.alive
+        coll_state = state.replace(alive=union_alive)
+
         if eff.is_eos:
             eos_mask = detect_eos(
-                state.positions[type_a], state.alive[type_a],
+                state.positions[type_a], union_alive[type_a],
                 height, width, block_size)
+            # Filter out actors killed by earlier effects
+            eos_mask = eos_mask & state.alive[type_a]
             state = apply_masked_effect(
                 state, prev_positions, type_a, -1, eos_mask,
                 effect_type, score_change, kwargs, height, width, max_n,
@@ -607,7 +631,7 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
                 continue
             elif static_a_idx is not None:
                 grid_mask = _collision_grid_mask_static_a(
-                    state, state.static_grids[static_a_idx], type_b,
+                    coll_state, state.static_grids[static_a_idx], type_b,
                     height, width, block_size, max_b=eff_max_b)
                 state = apply_static_a_effect(
                     state, static_a_idx, type_b, grid_mask,
@@ -625,32 +649,38 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
                     cached_grid_b = grid_cache[type_b]
                 elif type_b in cache_safe_type_b:
                     cached_grid_b = _build_occupancy_grid(
-                        state.positions[type_b, :eff_max_b],
-                        state.alive[type_b, :eff_max_b],
+                        coll_state.positions[type_b, :eff_max_b],
+                        union_alive[type_b, :eff_max_b],
                         height, width, block_size)
                     grid_cache[type_b] = cached_grid_b
 
             if collision_mode == 'static_b_grid':
                 coll_mask, partner_idx = _collision_mask_static_b_grid(
-                    state, type_a, state.static_grids[static_b_idx],
+                    coll_state, type_a, state.static_grids[static_b_idx],
                     height, width, block_size, max_a=eff_max_a)
             elif collision_mode == 'sweep':
                 coll_mask, partner_idx = _collision_mask_sweep(
-                    state, prev_positions, type_a, type_b,
+                    coll_state, prev_positions, type_a, type_b,
                     height, width, block_size, max_speed_cells,
                     max_a=eff_max_a, max_b=eff_max_b,
                     need_partner=need_partner)
             elif collision_mode == 'pixel_aabb':
                 coll_mask, partner_idx = _collision_mask_pixel_aabb(
-                    state, type_a, type_b, height, width, block_size,
+                    coll_state, type_a, type_b, height, width, block_size,
                     max_a=eff_max_a, max_b=eff_max_b,
                     need_partner=need_partner)
             else:
                 coll_mask, partner_idx = _collision_mask(
-                    state, type_a, type_b, height, width, block_size,
+                    coll_state, type_a, type_b, height, width, block_size,
                     max_a=eff_max_a, max_b=eff_max_b,
                     prebuilt_grid_b=cached_grid_b,
                     need_partner=need_partner)
+
+            # GVGAI deferred kills: actors killed by earlier effects are skipped
+            # (kill_list.contains(s1) check), but actees are not checked.
+            # coll_mask was computed from coll_alive (pre-effect), so it
+            # includes killed actors. Filter them out using current alive.
+            coll_mask = coll_mask & state.alive[type_a, :max_n]
 
             # once-per-step guards
             if effect_type in ('wall_stop', 'wall_bounce'):
@@ -938,7 +968,8 @@ def _npc_spawn_point(state, type_idx, cfg, height, width, block_size):
         target_speed=cfg.target_speed,
         target_singleton=cfg.target_singleton,
         target_cons=cfg.target_cons,
-        target_spawn_timers_init=cfg.target_spawn_timers_init)
+        target_spawn_timers_init=cfg.target_spawn_timers_init,
+        target_spawn_cd=cfg.target_spawn_cd)
 
 
 def _npc_bomber(state, type_idx, cfg, height, width, block_size):

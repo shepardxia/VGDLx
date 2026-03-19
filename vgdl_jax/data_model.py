@@ -491,3 +491,4 @@ class SpriteConfig:
     cons: int = 0  # RandomNPC: repeat same direction for N consecutive ticks
     target_cons: int = 0  # SpawnPoint/Bomber: cons value of target type (for RandomNPC targets)
     target_spawn_timers_init: int = 0  # SpawnPoint/Bomber: init spawn_timers for spawned sprites (cd if target is SpawnPoint/Bomber)
+    target_spawn_cd: int = 0  # SpawnPoint/Bomber: cooldown of target type (for dynamic spawn_timers init)

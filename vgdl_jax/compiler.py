@@ -349,15 +349,12 @@ def _build_sprite_configs(game_def, block_size):
                     cfg.target_cons = target_sd.cons
                 # If target is itself a SpawnPoint/Bomber AND the spawner has a
                 # higher type_idx (so it processes first in the reverse NPC loop),
-                # the target gets _pre_spawn on its spawn tick. Init spawn_timers
-                # to cd-1 so the first _pre_spawn brings it to cd → fires.
-                # This matches GVGAI where start=gameTick and (start+gameTick)%cd=0
-                # on the same tick. If spawner has lower type_idx (target type
-                # iterates before spawner), the target's first _pre_spawn is
-                # next tick, so leave spawn_timers at default 0.
+                # the target gets _pre_spawn on its spawn tick. Set target_spawn_cd
+                # so spawn_timers are initialized dynamically at runtime based on
+                # step_count, matching GVGAI's (start+gameTick)%cd formula.
                 if target_sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
                     if sd.type_idx > target_idx:
-                        cfg.target_spawn_timers_init = max(target_sd.cooldown, 1) - 1
+                        cfg.target_spawn_cd = max(target_sd.cooldown, 1)
             else:
                 cfg.target_orientation = (0., 0.)
                 cfg.target_speed = 0

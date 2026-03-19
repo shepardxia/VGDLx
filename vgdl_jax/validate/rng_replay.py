@@ -93,12 +93,15 @@ class RNGRecorder:
                 }
 
             elif sc in (SpriteClass.CHASER, SpriteClass.FLEEING):
+                # update_chaser does 2 splits: key (fallback dirs) + key_tie (Gumbel tie-breaking)
                 rng, key = jax.random.split(rng)
+                rng, key_tie = jax.random.split(rng)
                 # Fallback random dirs (always consumed even when targets alive)
                 dir_indices = np.array(jax.random.randint(key, (self.max_n,), 0, 4))
                 record[type_idx] = {
                     'class': sc, 'key': sprite_key,
                     'dir_indices': dir_indices,
+                    'key_tie': np.array(key_tie),
                 }
 
             elif sc == SpriteClass.SPAWN_POINT:
@@ -208,12 +211,27 @@ def patch_chaser_directions(record, prev_jax_state, sprite_configs,
                            np.array(dist_field)[r, np.clip(c + 1, 0, width - 1)], INF)
 
         neighbor_dists = np.stack([d_up, d_down, d_left, d_right], axis=-1)
-        if fleeing:
-            best_dir = np.argmax(neighbor_dists, axis=-1)
-        else:
-            best_dir = np.argmin(neighbor_dists, axis=-1)
 
-        record[type_idx]['dir_indices'] = best_dir.astype(np.int32)
+        # Gumbel-max tie-breaking: same as update_chaser in sprites.py
+        # Uses the recorded key_tie for deterministic reproduction of the
+        # exact tie-breaking VGDLx used.
+        neighbor_dists_jnp = jnp.array(neighbor_dists)
+        if fleeing:
+            best_val = jnp.max(neighbor_dists_jnp, axis=-1, keepdims=True)
+        else:
+            best_val = jnp.min(neighbor_dists_jnp, axis=-1, keepdims=True)
+        is_best = (neighbor_dists_jnp == best_val)
+
+        key_tie_arr = record[type_idx].get('key_tie')
+        if key_tie_arr is not None:
+            key_tie_jnp = jnp.array(key_tie_arr, dtype=jnp.uint32)
+            gumbel = jax.random.uniform(key_tie_jnp, neighbor_dists_jnp.shape)
+        else:
+            gumbel = jnp.zeros_like(neighbor_dists_jnp)
+        tie_scores = jnp.where(is_best, gumbel, -1.0)
+        best_dir = np.array(jnp.argmax(tie_scores, axis=-1)).astype(np.int32)
+
+        record[type_idx]['dir_indices'] = best_dir
 
 
 class ReplayRandomGenerator:
@@ -483,33 +501,61 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
         elif sc in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER):
             alive_mask = pre_alive[ti]
             slots = np.where(alive_mask)[0]
-            if len(slots) == 0:
+            # Also include newly-spawned spawners (alive in post but not pre).
+            # A Bomber created mid-tick (by SpawnPoint in the NPC loop) may
+            # try to spawn its own target in the same tick. Without an RNG
+            # record entry, GVGAI falls back to real random.
+            newly_alive_spawner = post_alive[ti] & ~pre_alive[ti]
+            new_spawner_slots = np.where(newly_alive_spawner)[0]
+            all_slots = np.union1d(slots, new_spawner_slots)
+            if len(all_slots) == 0:
                 continue
 
             # Per-spawner spawn outcome detection via position matching.
-            # A spawner spawned iff a newly-alive target sprite appeared at
-            # that spawner's position (SpawnPoint creates at its own pos).
+            # A spawner spawned iff a target sprite appeared/moved to the
+            # spawner's position. We detect both:
+            # 1. Newly-alive targets (pre dead, post alive)
+            # 2. Slot-recycled targets (pre alive, killed during step, slot
+            #    reused by new spawn — position changes to match a spawner)
             target_ti = spawn_target_map.get(ti) if spawn_target_map else None
+            candidate_target_pos_list = []
             if target_ti is not None:
-                # Find newly alive target slots
+                # Newly alive targets
                 newly_alive = post_alive[target_ti] & ~pre_alive[target_ti]
-                new_slots = np.where(newly_alive)[0]
-                new_target_pos = post_pos[target_ti][new_slots]  # [n_new, 2]
+                new_slots_t = np.where(newly_alive)[0]
+                if len(new_slots_t) > 0:
+                    candidate_target_pos_list.append(post_pos[target_ti][new_slots_t])
+                # Slot-recycled targets: alive in both pre and post, but
+                # position changed significantly (died + respawned in same slot)
+                both_alive = pre_alive[target_ti] & post_alive[target_ti]
+                both_slots = np.where(both_alive)[0]
+                if len(both_slots) > 0:
+                    pos_diff = np.abs(post_pos[target_ti][both_slots].astype(np.float64)
+                                      - pre_pos[target_ti][both_slots].astype(np.float64))
+                    moved_far = np.sum(pos_diff, axis=1) > block_size
+                    recycled_slots = both_slots[moved_far]
+                    if len(recycled_slots) > 0:
+                        candidate_target_pos_list.append(post_pos[target_ti][recycled_slots])
+
+            if candidate_target_pos_list:
+                candidate_target_pos = np.concatenate(candidate_target_pos_list, axis=0)
             else:
-                new_target_pos = np.empty((0, 2), dtype=pre_pos.dtype)
+                candidate_target_pos = np.empty((0, 2), dtype=pre_pos.dtype)
 
             entries = []
-            for slot in slots:
-                spawner_pos = pre_pos[ti, slot]  # [2] pixel coords
-                # Check if any newly alive target matches this spawner's position.
+            for slot in all_slots:
+                # Use pre_pos for pre-existing spawners, post_pos for newly-spawned
+                if pre_alive[ti][slot]:
+                    spawner_pos = pre_pos[ti, slot]
+                else:
+                    spawner_pos = post_pos[ti, slot]
+                # Check if any candidate target matches this spawner's position.
                 # Use block_size as threshold: spawned sprites (Chaser, RandomNPC)
                 # can move up to speed_px pixels on their spawn tick, so by
                 # post_state they may no longer be at the spawner's position.
-                # speed_px < block_size for all grid-physics sprites, so
-                # block_size is a safe upper bound.
-                if len(new_target_pos) > 0:
-                    dists = (np.abs(new_target_pos[:, 0] - spawner_pos[0])
-                             + np.abs(new_target_pos[:, 1] - spawner_pos[1]))
+                if len(candidate_target_pos) > 0:
+                    dists = (np.abs(candidate_target_pos[:, 0] - spawner_pos[0])
+                             + np.abs(candidate_target_pos[:, 1] - spawner_pos[1]))
                     did_spawn = bool(np.any(dists < block_size))
                 else:
                     did_spawn = False

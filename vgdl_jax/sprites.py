@@ -299,7 +299,8 @@ def spawn_sprite(state: GameState, pos, target_type, orientation, speed):
 def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
                        target_type, target_orientation, target_speed,
                        target_singleton=False, target_cons=0,
-                       target_spawn_timers_init=0):
+                       target_spawn_timers_init=0,
+                       target_spawn_cd=0):
     """Conditionally spawn sprites — fully vectorized via prefix-sum slot allocation.
 
     Uses spawn_timers (not cooldown_timers) for spawn readiness checks, so
@@ -315,6 +316,10 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
     If target_cons > 0, set direction_ticks=cons and orientation=(0,0) for
     spawned sprites (RandomNPC cons initialization, matching GVGAI addSprite
     from template with counter=0, prevAction=DNONE).
+
+    If target_spawn_cd > 0, the target is itself a SpawnPoint/Bomber. Its
+    spawn_timers are initialized dynamically based on state.step_count to match
+    GVGAI's (start+gameTick)%cd formula where start=gameTick at first update.
 
     NOTE: The slot-filling field writes (alive, positions, orientations, speeds,
     ages, cooldown_timers, is_first_tick) duplicate _fill_slots() in effects.py.
@@ -375,15 +380,17 @@ def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
                            state.direction_ticks[target_type])))
 
     # Set spawn_timers for spawned SpawnPoint/Bomber targets.
-    # In GVGAI, a newly-spawned Bomber sets start=gameTick, and
-    # (start+gameTick)%cd = (2*gameTick)%cd fires on spawn tick when
-    # gameTick is a multiple of cd/gcd(2,cd). For the common case
-    # (gameTick=0 or target created in a tick that's a multiple of cd),
-    # it fires immediately. We approximate by initializing spawn_timers=cd.
-    if target_spawn_timers_init > 0:
+    # GVGAI: start = gameTick on first update(). Formula: (start+gameTick)%cd.
+    # For tick-spawned targets processed in the same tick: start = step_count.
+    # First fire check: (2*step_count) % cd == 0.
+    # VGDLx: _pre_spawn increments spawn_timers, fires when >= cd.
+    # Set init = cd - 1 - ((2*step_count) % cd) so first _pre_spawn brings it
+    # to cd iff (2*step_count)%cd==0, matching GVGAI exactly.
+    if target_spawn_cd > 0:
+        init_val = target_spawn_cd - 1 - ((2 * state.step_count) % target_spawn_cd)
         state = state.replace(
             spawn_timers=state.spawn_timers.at[target_type].set(
-                jnp.where(should_fill, target_spawn_timers_init,
+                jnp.where(should_fill, init_val,
                            state.spawn_timers[target_type])))
 
     # Update spawn counts — only for spawners that actually got a slot
