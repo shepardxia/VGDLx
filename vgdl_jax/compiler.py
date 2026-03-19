@@ -92,10 +92,17 @@ def _find_static_types(game_def):
     spawn_targets = set()
     for ed in game_def.effects:
         if ed.effect_type in ('transform_to', 'transform_others_to',
-                               'spawn_if_has_more', 'clone_sprite'):
+                               'spawn', 'spawn_if_has_more', 'spawn_if_has_less',
+                               'clone_sprite', 'transform_to_singleton'):
             stype = ed.kwargs.get('stype', '') or ed.kwargs.get('target', '')
             for idx in game_def.resolve_stype(stype):
                 spawn_targets.add(idx)
+            # transformToSingleton's stype_other also needs to be non-static
+            # (existing new_type sprites transform back to other_type)
+            other_stype = ed.kwargs.get('stype_other', '')
+            if other_stype:
+                for idx in game_def.resolve_stype(other_stype):
+                    spawn_targets.add(idx)
     for sd in game_def.sprites:
         if sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER,
                                 SpriteClass.SPREADER):
@@ -108,7 +115,8 @@ def _find_static_types(game_def):
         'wind_gust', 'slip_forward', 'teleport_to_exit', 'wrap_around',
     }
     MODIFY_TYPE_A_EFFECTS = {
-        'transform_to', 'clone_sprite', 'change_resource',
+        'transform_to', 'transform_to_singleton', 'clone_sprite',
+        'change_resource',
     }
     DISQUALIFYING_EFFECTS = FORCE_MOVE_EFFECTS | MODIFY_TYPE_A_EFFECTS
     position_modified_types = set()
@@ -417,6 +425,14 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                         block_size=block_size)
                     # max_speed_cells: for sweep collision
                     max_speed_px = max(speed_a_px, speed_b_px, 1)
+                    eff_kwargs = compile_effect_kwargs(ed, CompileContext(
+                        game_def, resource_name_to_idx, resource_limits,
+                        avatar_type_idx, concrete_actor_idx=ta_idx,
+                        concrete_actee_idx=tb_idx,
+                        resolve_first=_resolve_first,
+                        block_size=block_size))
+                    # Per-instance needs_partner: e.g. transformTo with killSecond
+                    needs_partner = eff_kwargs.get('kill_second', False)
                     ce = CompiledEffect(
                         type_a=ta_idx,
                         type_b=tb_idx,
@@ -429,12 +445,8 @@ def _build_compiled_effects(game_def, static_type_set, static_grid_map,
                         max_b=type_max_n[tb_idx],
                         static_a_grid_idx=static_grid_map.get(ta_idx),
                         static_b_grid_idx=static_grid_map.get(tb_idx),
-                        kwargs=compile_effect_kwargs(ed, CompileContext(
-                            game_def, resource_name_to_idx, resource_limits,
-                            avatar_type_idx, concrete_actor_idx=ta_idx,
-                            concrete_actee_idx=tb_idx,
-                            resolve_first=_resolve_first,
-                            block_size=block_size)),
+                        kwargs=eff_kwargs,
+                        needs_partner=needs_partner,
                     )
                     for _ in range(repeat):
                         compiled_effects.append(ce)

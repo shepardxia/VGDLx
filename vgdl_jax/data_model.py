@@ -451,6 +451,7 @@ class CompiledEffect:
     collision_mode: str = 'grid'
     max_speed_cells: int = 1
     max_b: int = 0
+    needs_partner: bool = False  # per-instance override for partner_idx requirement
 
 
 @dataclass

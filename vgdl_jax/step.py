@@ -150,6 +150,15 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
     _static_distance_fields = static_distance_fields or {}
     _dynamic_chaser_targets = sorted(chaser_target_set - set(_static_distance_fields))
 
+    # Pre-compute per-type avatar dispatch info.
+    # Identify MissileAvatar types: they auto-move, ignoring player input.
+    _missile_avatar_types = frozenset(
+        at for at in avatar_config.avatar_type_indices
+        if sprite_configs[at].sprite_class == SpriteClass.MISSILE_AVATAR)
+    _non_missile_avatar_types = tuple(
+        at for at in avatar_config.avatar_type_indices
+        if at not in _missile_avatar_types)
+
     # Pre-compute cache-safe types for occupancy grid caching.
     _pos_modified_types = set()
     _has_undo_all = False
@@ -175,6 +184,17 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
         for at in avatar_config.avatar_type_indices:
             state = _pre_movement(state, at)
 
+        # MissileAvatar types: auto-move in orientation direction (ignore input).
+        # Handled separately because they use passive movement even in games
+        # where the primary avatar is MovingAvatar (e.g. catapults, vortex).
+        for at in _missile_avatar_types:
+            cooldown = sprite_configs[at].cooldown or 1
+            new_pos, new_timers, _, first_tick = _move_with_cooldown(
+                state, at, cooldown)
+            state = _apply_npc_move(state, at, new_pos, new_timers,
+                                    first_tick_mask=first_tick)
+
+        # Non-missile avatar types: dispatch by primary avatar class
         if avatar_config.physics_type == PHYSICS_CONTINUOUS:
             state = update_inertial_avatar(
                 state, action,
@@ -192,8 +212,8 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                 gravity=avatar_config.gravity,
                 airsteering=avatar_config.airsteering)
         elif avatar_config.is_missile_avatar:
-            state = _update_missile_avatar(state, action, avatar_config, height, width,
-                                            block_size=block_size)
+            # All types are missile — already handled above
+            pass
         elif avatar_config.is_aimed:
             state = _update_aimed_avatar(state, action, avatar_config, height, width,
                                          block_size=block_size)
@@ -201,8 +221,14 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
             state = _update_rotating_avatar(state, action, avatar_config, height, width,
                                              block_size=block_size)
         else:
-            state = _update_avatar(state, action, avatar_config, height, width,
-                                   block_size=block_size)
+            # For mixed games: only update non-missile types
+            if _missile_avatar_types:
+                for at in _non_missile_avatar_types:
+                    state = _update_avatar_single(
+                        state, action, avatar_config, at, height, width, block_size)
+            else:
+                state = _update_avatar(state, action, avatar_config, height, width,
+                                       block_size=block_size)
 
         # 2. NPC sprites: preMovement then update, in REVERSE order
         # (matching GVGAI tick() lines 1377-1387: reverse spriteOrder ensures
@@ -636,7 +662,7 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
                 continue
 
             # ── Collision detection ──
-            need_partner = effect_type in PARTNER_IDX_EFFECTS
+            need_partner = (effect_type in PARTNER_IDX_EFFECTS) or eff.needs_partner
 
             # Occupancy grid cache for grid/pixel_aabb modes
             cached_grid_b = None
@@ -690,11 +716,27 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
                     'kill_both', 'wall_stop', 'wall_bounce', 'bounce_direction'):
                 eff_kwargs = dict(kwargs, static_b_grid_idx=static_b_idx)
 
+            # Snapshot alive before this effect to detect newly spawned sprites.
+            alive_before = state.alive
+
             state = apply_masked_effect(
                 state, prev_positions, type_a, type_b, coll_mask,
                 effect_type, score_change, eff_kwargs, height, width, max_n,
                 max_a=eff_max_a, max_b=eff_max_b,
                 partner_idx=partner_idx, block_size=block_size)
+
+            # Update prev_positions for sprites spawned by THIS effect.
+            # GVGAI TransformTo copies sprite1.lastrect to newSprite.lastrect,
+            # so stepBack on the new sprite reverts to the source's pre-movement pos.
+            if effect_type in ('transform_to', 'transform_to_singleton'):
+                new_type = eff_kwargs.get('new_type_idx', -1)
+                if new_type >= 0:
+                    # Only sprites that became alive in THIS effect application
+                    spawned_now = state.alive[new_type] & ~alive_before[new_type]
+                    prev_positions = prev_positions.at[new_type].set(
+                        jnp.where(spawned_now[:, None],
+                                  prev_positions[type_a],
+                                  prev_positions[new_type]))
 
     return state
 

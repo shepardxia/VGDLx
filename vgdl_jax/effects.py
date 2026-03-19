@@ -191,6 +191,13 @@ def _fill_slots(state, target_type, source_mask, src_positions,
         state = state.replace(
             resources=state.resources.at[target_type].set(
                 jnp.where(should_fill[:, None], src_res, state.resources[target_type])))
+    else:
+        # Reset resources to 0 for newly spawned sprites. GVGAI addSprite()
+        # creates sprites with empty resource maps — stale resources in a
+        # reused dead slot must not carry over.
+        state = state.replace(
+            resources=state.resources.at[target_type].set(
+                jnp.where(should_fill[:, None], 0, state.resources[target_type])))
     if target_spawn_cd > 0:
         # GVGAI: effect-spawned Bomber/SpawnPoint gets start=-1 (loadDefaults).
         # First update at step_count+1 sets start=step_count+1.
@@ -560,11 +567,13 @@ def spend_avatar_resource(state, mask, score_delta, kwargs, **_):
 
 # ── Spawn and transform ───────────────────────────────────────────────
 
-def transform_to(state, type_a, mask, score_delta, kwargs, **_):
+def transform_to(state, type_a, type_b, mask, score_delta, kwargs,
+                  partner_idx=None, **_):
     new_type = kwargs['new_type_idx']
     target_speed = kwargs.get('target_speed', None)
     target_cons = kwargs.get('target_cons', 0)
     target_spawn_cd = kwargs.get('target_spawn_cd', 0)
+    kill_second = kwargs.get('kill_second', False)
     copy_ori = kwargs.get('copy_orientation', True)
     if copy_ori:
         orientations = state.orientations[type_a]
@@ -574,12 +583,23 @@ def transform_to(state, type_a, mask, score_delta, kwargs, **_):
             jnp.array(default_ori, dtype=jnp.float32),
             state.orientations[type_a].shape)
     state = _with_score(prim_kill(state, type_a, mask), score_delta)
-    return _fill_slots(state, new_type, mask,
+    state = _fill_slots(state, new_type, mask,
                        state.positions[type_a], orientations,
                        target_speed=target_speed, reset_cooldown=True,
                        src_resources=state.resources[type_a],
                        target_cons=target_cons,
                        target_spawn_cd=target_spawn_cd)
+    if kill_second and type_b >= 0:
+        # GVGAI TransformTo.killSecond: also kill sprite2 (the collision partner)
+        if partner_idx is not None:
+            b_mask = mask & (partner_idx >= 0)
+            kill_b = jnp.zeros(state.alive.shape[1], dtype=jnp.bool_)
+            kill_b = kill_b.at[partner_idx].max(b_mask)
+            state = prim_kill(state, type_b, kill_b)
+        else:
+            # Fallback: kill all alive type_b at colliding positions
+            pass
+    return state
 
 
 def clone_sprite(state, type_a, mask, score_delta, kwargs=None, **_):
@@ -594,12 +614,18 @@ def clone_sprite(state, type_a, mask, score_delta, kwargs=None, **_):
     return _with_score(state, score_delta)
 
 
-def spawn(state, type_a, mask, score_delta, kwargs, **_):
+def spawn(state, type_a, mask, score_delta, kwargs, max_n, **_):
     spawn_type = kwargs.get('spawn_type_idx', -1)
     target_speed = kwargs.get('target_speed', None)
     target_cons = kwargs.get('target_cons', 0)
     target_spawn_cd = kwargs.get('target_spawn_cd', 0)
+    prob = kwargs.get('prob', 1.0)
     if spawn_type >= 0:
+        if prob < 1.0:
+            rng, key = jax.random.split(state.rng)
+            state = state.replace(rng=rng)
+            rolls = jax.random.uniform(key, (max_n,))
+            mask = mask & (rolls < prob)
         state = _fill_slots(state, spawn_type, mask,
                             state.positions[type_a],
                             target_speed=target_speed, reset_cooldown=True,
@@ -1020,6 +1046,12 @@ def _ckw_transform_to(ed, ctx):
         _add_spawn_kwargs(result, dst_def, ctx.block_size)
         if not copy_ori:
             result['default_orientation'] = dst_def.orientation
+        # GVGAI TransformTo.killSecond: also kill the collision partner
+        kill_second = ed.kwargs.get('killSecond', 'false')
+        if isinstance(kill_second, str):
+            kill_second = kill_second.lower() == 'true'
+        if kill_second:
+            result['kill_second'] = True
         return result
     return {}
 
@@ -1102,6 +1134,9 @@ def _ckw_spawn(ed, ctx):
         sd = ctx.game_def.sprites[idx]
         kwargs['spawn_type_idx'] = idx
         _add_spawn_kwargs(kwargs, sd, ctx.block_size)
+    prob = float(ed.kwargs.get('prob', 1.0))
+    if prob < 1.0:
+        kwargs['prob'] = prob
     return kwargs
 
 def _ckw_prob_half(ed, ctx):
@@ -1310,6 +1345,71 @@ def _static_collect_resource(state, sg_idx, type_b, grid_mask,
         n_killed * jnp.int32(score_change))
 
 
+def _static_spawn(state, sg_idx, type_b, grid_mask, score_change, kwargs,
+                   height, width, block_size=1):
+    """Static type_a spawn: spawn target sprites at type_b positions that
+    overlap with the static_a grid (given by grid_mask [H,W]).
+
+    In GVGAI, Spawn creates a new sprite at sprite1's position. For static
+    type_a, sprite1's position is the grid cell. Since grid_mask gives the
+    collision cells, we use type_b's positions (which are at those same cells)
+    as the spawn locations.
+    """
+    spawn_type = kwargs.get('spawn_type_idx', -1)
+    target_speed = kwargs.get('target_speed', None)
+    target_cons = kwargs.get('target_cons', 0)
+    target_spawn_cd = kwargs.get('target_spawn_cd', 0)
+    prob = kwargs.get('prob', 1.0)
+    if spawn_type < 0 or type_b < 0:
+        return state
+    max_n = state.alive.shape[1]
+    # Find type_b sprites that collide with the static grid
+    pos_b = state.positions[type_b]
+    alive_b = state.alive[type_b]
+    ib_b = in_bounds(pos_b // block_size, height, width)
+    effective_b = alive_b & ib_b
+    r_b = jnp.clip(pos_b[:, 0] // block_size, 0, height - 1)
+    c_b = jnp.clip(pos_b[:, 1] // block_size, 0, width - 1)
+    # Type_b sprites on colliding cells
+    source_mask = effective_b & grid_mask[r_b, c_b]
+    if prob < 1.0:
+        rng, key = jax.random.split(state.rng)
+        state = state.replace(rng=rng)
+        rolls = jax.random.uniform(key, (max_n,))
+        source_mask = source_mask & (rolls < prob)
+    # Spawn at type_b's positions (same cell as static_a)
+    state = _fill_slots(state, spawn_type, source_mask, pos_b,
+                        target_speed=target_speed, reset_cooldown=True,
+                        target_cons=target_cons, target_spawn_cd=target_spawn_cd)
+    return _with_score(state, source_mask.sum() * jnp.int32(score_change))
+
+
+def _static_spawn_if_has_more(state, sg_idx, type_b, grid_mask, score_change,
+                               kwargs, height, width, block_size=1):
+    """Static type_a spawnIfHasMore: spawn only if type_b's resource >= limit."""
+    spawn_type = kwargs.get('spawn_type_idx', -1)
+    r_idx = kwargs.get('resource_idx', 0)
+    limit = kwargs.get('limit', 0)
+    if spawn_type < 0 or type_b < 0:
+        return state
+    target_speed = kwargs.get('target_speed', None)
+    target_cons = kwargs.get('target_cons', 0)
+    target_spawn_cd = kwargs.get('target_spawn_cd', 0)
+    # Build resource grid: cells where type_b has resource >= limit
+    pos_b = state.positions[type_b]
+    alive_b = state.alive[type_b]
+    ib_b = in_bounds(pos_b // block_size, height, width)
+    has_enough = alive_b & ib_b & (state.resources[type_b, :, r_idx] >= limit)
+    res_grid = jnp.zeros((height, width), dtype=jnp.bool_)
+    r_b = jnp.clip(pos_b[:, 0] // block_size, 0, height - 1)
+    c_b = jnp.clip(pos_b[:, 1] // block_size, 0, width - 1)
+    res_grid = res_grid.at[r_b, c_b].max(has_enough)
+    effective_mask = grid_mask & res_grid
+    # Delegate to _static_spawn logic
+    return _static_spawn(state, sg_idx, type_b, effective_mask, score_change,
+                         dict(kwargs, prob=1.0), height, width, block_size=block_size)
+
+
 # ── Dispatch ───────────────────────────────────────────────────────────
 
 EFFECT_REGISTRY = {
@@ -1379,9 +1479,11 @@ EFFECT_REGISTRY = {
     'cloneSprite':       EffectEntry(clone_sprite, 'clone_sprite',
         modifies_alive=True, compile_kwargs=_ckw_clone_sprite),
     'spawn':             EffectEntry(spawn, 'spawn',
-        modifies_alive=True, compile_kwargs=_ckw_spawn),
+        modifies_alive=True, static_a_handler=_static_spawn,
+        compile_kwargs=_ckw_spawn),
     'spawnIfHasMore':    EffectEntry(spawn_if_has_more, 'spawn_if_has_more',
-        modifies_alive=True, compile_kwargs=_ckw_spawn_if_has_more),
+        modifies_alive=True, static_a_handler=_static_spawn_if_has_more,
+        compile_kwargs=_ckw_spawn_if_has_more),
     'spawnIfHasLess':    EffectEntry(spawn_if_has_less, 'spawn_if_has_less',
         modifies_alive=True, compile_kwargs=_ckw_spawn_if_has_more),  # same kwargs pattern
     'TransformOthersTo': EffectEntry(transform_others_to, 'transform_others_to',
