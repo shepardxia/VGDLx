@@ -162,6 +162,34 @@ def update_random_npc(state: GameState, type_idx, cooldown, cons=0):
     return state
 
 
+def _relax_distance_field(init_grid, height, width):
+    """Run Manhattan-distance BFS relaxation on an initial distance grid.
+
+    Iterates (height + width) times, each step propagating the minimum
+    distance from the 4 cardinal neighbours + 1.
+
+    Args:
+        init_grid: [H, W] int32 — 0 at source cells, INF elsewhere.
+        height: grid height (used for iteration count).
+        width: grid width (used for iteration count).
+
+    Returns:
+        [H, W] int32 distance field.
+    """
+    INF = jnp.int32(height + width)
+
+    def _relax_step(_, dist):
+        padded = jnp.pad(dist, 1, mode='constant', constant_values=INF)
+        up    = padded[:-2, 1:-1] + 1
+        down  = padded[2:,  1:-1] + 1
+        left  = padded[1:-1, :-2] + 1
+        right = padded[1:-1, 2:]  + 1
+        return jnp.minimum(dist, jnp.minimum(
+            jnp.minimum(up, down), jnp.minimum(left, right)))
+
+    return jax.lax.fori_loop(0, height + width, _relax_step, init_grid)
+
+
 def _manhattan_distance_field(target_pos, target_alive, height, width, block_size):
     """Compute Manhattan distance to nearest alive target for every grid cell.
 
@@ -182,16 +210,7 @@ def _manhattan_distance_field(target_pos, target_alive, height, width, block_siz
     c = jnp.clip(itarget_cell[:, 1], 0, width - 1)
     grid = grid.at[r, c].min(jnp.where(effective, jnp.int32(0), INF))
 
-    def relax(_, dist):
-        padded = jnp.pad(dist, 1, mode='constant', constant_values=INF)
-        up    = padded[:-2, 1:-1] + 1
-        down  = padded[2:,  1:-1] + 1
-        left  = padded[1:-1, :-2] + 1
-        right = padded[1:-1, 2:]  + 1
-        return jnp.minimum(dist, jnp.minimum(
-            jnp.minimum(up, down), jnp.minimum(left, right)))
-
-    return jax.lax.fori_loop(0, height + width, relax, grid)
+    return _relax_distance_field(grid, height, width)
 
 
 def update_chaser(state: GameState, type_idx, target_type_idx, cooldown,
@@ -299,7 +318,6 @@ def spawn_sprite(state: GameState, pos, target_type, orientation, speed):
 def update_spawn_point(state: GameState, type_idx, cooldown, prob, total,
                        target_type, target_orientation, target_speed,
                        target_singleton=False, target_cons=0,
-                       target_spawn_timers_init=0,
                        target_spawn_cd=0):
     """Conditionally spawn sprites — fully vectorized via prefix-sum slot allocation.
 

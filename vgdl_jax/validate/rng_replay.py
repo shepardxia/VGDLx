@@ -12,6 +12,8 @@ produce a JSON file that GVGAI's TraceAgent reads to inject matching RNG.
 
 Together, these ensure both engines use identical random outcomes.
 """
+from collections import Counter
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -503,7 +505,6 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
                 entries.append(entry)
 
             # Detect duplicate positions — enable consume for overlapping entries
-            from collections import Counter
             pos_counts = Counter(entry_positions)
             has_duplicates = any(v > 1 for v in pos_counts.values())
             for i, entry in enumerate(entries):

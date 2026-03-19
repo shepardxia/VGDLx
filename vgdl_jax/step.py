@@ -22,7 +22,7 @@ from vgdl_jax.sprites import (
     update_missile, update_erratic_missile, update_random_npc,
     update_random_inertial, update_spreader, update_chaser,
     update_spawn_point, update_walk_jumper,
-    _manhattan_distance_field, flicker_age,
+    _manhattan_distance_field, _relax_distance_field, flicker_age,
 )
 from vgdl_jax.terminations import check_all_terminations
 
@@ -216,16 +216,8 @@ def build_step_fn(effects, terminations, sprite_configs, avatar_config, params,
                 # Build distance field from grid: set distance=0 at occupied cells
                 INF_val = jnp.int32(height + width)
                 init_dist = jnp.where(grid, jnp.int32(0), INF_val)
-                def relax_grid(_, dist):
-                    padded = jnp.pad(dist, 1, mode='constant', constant_values=INF_val)
-                    up    = padded[:-2, 1:-1] + 1
-                    down  = padded[2:,  1:-1] + 1
-                    left  = padded[1:-1, :-2] + 1
-                    right = padded[1:-1, 2:]  + 1
-                    return jnp.minimum(dist, jnp.minimum(
-                        jnp.minimum(up, down), jnp.minimum(left, right)))
-                dist_fields[target_idx] = jax.lax.fori_loop(
-                    0, height + width, relax_grid, init_dist)
+                dist_fields[target_idx] = _relax_distance_field(
+                    init_dist, height, width)
             else:
                 dist_fields[target_idx] = _manhattan_distance_field(
                     state.positions[target_idx], state.alive[target_idx],
@@ -968,7 +960,6 @@ def _npc_spawn_point(state, type_idx, cfg, height, width, block_size):
         target_speed=cfg.target_speed,
         target_singleton=cfg.target_singleton,
         target_cons=cfg.target_cons,
-        target_spawn_timers_init=cfg.target_spawn_timers_init,
         target_spawn_cd=cfg.target_spawn_cd)
 
 
