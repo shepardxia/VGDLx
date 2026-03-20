@@ -1,0 +1,162 @@
+{
+  "bait": {
+    "gvgai_sps": 941.6,
+    "jax_single_sps": 4814.2,
+    "jax_batched_sps": 179913.9,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 5.1,
+    "speedup_batched": 191.1
+  },
+  "brainman": {
+    "gvgai_sps": 642.6,
+    "jax_single_sps": 7720.2,
+    "jax_batched_sps": 81121.7,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 12.0,
+    "speedup_batched": 126.2
+  },
+  "butterflies": {
+    "gvgai_sps": 490.4,
+    "jax_single_sps": 4172.2,
+    "jax_batched_sps": 293767.3,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 8.5,
+    "speedup_batched": 599.0
+  },
+  "chainreaction": {
+    "gvgai_sps": 1092.9,
+    "jax_single_sps": 9367.4,
+    "jax_batched_sps": 49089.7,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 8.6,
+    "speedup_batched": 44.9
+  },
+  "chase": {
+    "gvgai_sps": 435.2,
+    "jax_single_sps": 6677.2,
+    "jax_batched_sps": 48434.1,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 15.3,
+    "speedup_batched": 111.3
+  },
+  "chipschallenge": {
+    "gvgai_sps": 377.4,
+    "jax_single_sps": 6907.1,
+    "jax_batched_sps": 58697.5,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 18.3,
+    "speedup_batched": 155.5
+  },
+  "clusters": {
+    "gvgai_sps": 1110.4,
+    "jax_single_sps": 9445.0,
+    "jax_batched_sps": 51733.2,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 8.5,
+    "speedup_batched": 46.6
+  },
+  "cookmepasta": {
+    "gvgai_sps": 651.5,
+    "jax_single_sps": 5435.7,
+    "jax_batched_sps": 57616.7,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 8.3,
+    "speedup_batched": 88.4
+  },
+  "flower": {
+    "gvgai_sps": 704.1,
+    "jax_single_sps": 9201.6,
+    "jax_batched_sps": 164543.7,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 13.1,
+    "speedup_batched": 233.7
+  },
+  "modality": {
+    "gvgai_sps": 850.0,
+    "jax_single_sps": 11491.3,
+    "jax_batched_sps": 117636.9,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 13.5,
+    "speedup_batched": 138.4
+  },
+  "portals": {
+    "gvgai_sps": 914.8,
+    "jax_single_sps": 8534.0,
+    "jax_batched_sps": 134465.8,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 9.3,
+    "speedup_batched": 147.0
+  },
+  "realsokoban": {
+    "gvgai_sps": 752.5,
+    "jax_single_sps": 12278.1,
+    "jax_batched_sps": 192306.4,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 16.3,
+    "speedup_batched": 255.5
+  },
+  "shipwreck": {
+    "gvgai_sps": 219.2,
+    "jax_single_sps": 1884.1,
+    "jax_batched_sps": 54289.7,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 8.6,
+    "speedup_batched": 247.6
+  },
+  "sokoban": {
+    "gvgai_sps": 592.6,
+    "jax_single_sps": 14084.8,
+    "jax_batched_sps": 357637.4,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 23.8,
+    "speedup_batched": 603.5
+  },
+  "superman": {
+    "gvgai_sps": 650.4,
+    "jax_single_sps": 1028.6,
+    "jax_batched_sps": 23559.6,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 1.6,
+    "speedup_batched": 36.2
+  },
+  "tercio": {
+    "gvgai_sps": 658.7,
+    "jax_single_sps": 6891.0,
+    "jax_batched_sps": 51562.4,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 10.5,
+    "speedup_batched": 78.3
+  },
+  "thecitadel": {
+    "gvgai_sps": 500.2,
+    "jax_single_sps": 12100.3,
+    "jax_batched_sps": 106738.0,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 24.2,
+    "speedup_batched": 213.4
+  },
+  "thesnowman": {
+    "gvgai_sps": 585.6,
+    "jax_single_sps": 5263.0,
+    "jax_batched_sps": 61730.3,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 9.0,
+    "speedup_batched": 105.4
+  },
+  "waitforbreakfast": {
+    "gvgai_sps": 1132.4,
+    "jax_single_sps": 3429.0,
+    "jax_batched_sps": 27109.6,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 3.0,
+    "speedup_batched": 23.9
+  },
+  "wrapsokoban": {
+    "gvgai_sps": 741.4,
+    "jax_single_sps": 12102.5,
+    "jax_batched_sps": 178969.1,
+    "jax_batched_n_envs": 256,
+    "speedup_single": 16.3,
+    "speedup_batched": 241.4
+  }
+}

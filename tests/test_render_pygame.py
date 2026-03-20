@@ -55,11 +55,11 @@ def test_render_pygame_matches_jax():
     """Pygame renderer and JAX renderer produce the same output at block_size=1."""
     import jax.numpy as jnp
     from vgdl_jax.render import render_pygame, render_rgb
-    from vgdl_jax.env import VGDLJaxEnv
+    from vgdl_jax.env import VGDLxEnv
 
     game_file = os.path.join(GAMES_DIR, 'chase.txt')
     level_file = os.path.join(GAMES_DIR, 'chase_lvl0.txt')
-    env = VGDLJaxEnv(game_file, level_file)
+    env = VGDLxEnv(game_file, level_file)
     gd = env.compiled.game_def
 
     rng = jax.random.PRNGKey(0)

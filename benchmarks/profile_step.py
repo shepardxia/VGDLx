@@ -10,7 +10,7 @@ import os
 import time
 import jax
 import jax.numpy as jnp
-from vgdl_jax.env import VGDLJaxEnv
+from vgdl_jax.env import VGDLxEnv
 from vgdl_jax.parser import parse_vgdl
 from vgdl_jax.compiler import compile_game
 
@@ -23,7 +23,7 @@ def profile_hlo(game_name, game_file, level_file):
     print(f"  HLO Analysis: {game_name}")
     print(f"{'='*70}")
 
-    env = VGDLJaxEnv(game_file, level_file)
+    env = VGDLxEnv(game_file, level_file)
     compiled = env.compiled
 
     print(f"  n_types={len(compiled.game_def.sprites)}, "
@@ -198,7 +198,7 @@ def profile_step_decomposed(game_name, game_file, level_file, n_envs=256,
 
     # Setup batched
     rngs = jax.random.split(jax.random.PRNGKey(0), n_envs)
-    env = VGDLJaxEnv(game_file, level_file)
+    env = VGDLxEnv(game_file, level_file)
     _, state_batch = jax.vmap(env.reset)(rngs)
     jax.block_until_ready(state_batch.positions)
 

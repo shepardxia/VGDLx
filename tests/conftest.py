@@ -2,7 +2,7 @@
 import os
 import sys
 from vgdl_jax.validate.constants import PYVGDL_GAMES_DIR, PYVGDL_GAMES
-from vgdl_jax.env import VGDLJaxEnv
+from vgdl_jax.env import VGDLxEnv
 
 # Aliases used by many test files
 GAMES_DIR = PYVGDL_GAMES_DIR
@@ -15,6 +15,6 @@ if PYVGDL_DIR not in sys.path:
 
 
 def make_env(game_name):
-    """Create a VGDLJaxEnv for the given game name."""
+    """Create a VGDLxEnv for the given game name."""
     entry = PYVGDL_GAMES[game_name]
-    return VGDLJaxEnv(entry.game_file, entry.level_files[0])
+    return VGDLxEnv(entry.game_file, entry.level_files[0])

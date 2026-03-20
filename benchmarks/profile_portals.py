@@ -4,7 +4,7 @@ Profile all games: effect counts, compilation time, per-step time, stability.
 import time
 import os
 import jax
-from vgdl_jax.env import VGDLJaxEnv
+from vgdl_jax.env import VGDLxEnv
 from vgdl_jax.parser import parse_vgdl
 from vgdl_jax.data_model import STATIC_CLASSES, AVATAR_CLASSES
 from vgdl_jax.effects import PARTNER_IDX_EFFECTS
@@ -51,7 +51,7 @@ def analyze_game(name, game_file, level_file):
 
 def benchmark_game(name, game_file, level_file, n_envs=256, n_steps=200, n_trials=5):
     """Run benchmark with compilation timing and stability."""
-    env = VGDLJaxEnv(game_file, level_file)
+    env = VGDLxEnv(game_file, level_file)
     max_n = env.compiled.init_state.alive.shape[1]
     n_types = len(env.compiled.game_def.sprites)
 

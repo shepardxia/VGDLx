@@ -5,7 +5,7 @@ Tests vmap over N parallel environments, measures steps/second.
 import time
 import os
 import jax
-from vgdl_jax.env import VGDLJaxEnv
+from vgdl_jax.env import VGDLxEnv
 
 GAMES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl', 'vgdl', 'games')
 
@@ -15,7 +15,7 @@ def benchmark_game(game_name, game_file, level_file, n_envs=256, n_steps=200):
     print(f"  {game_name}  |  {n_envs} envs  |  {n_steps} steps")
     print(f"{'='*60}")
 
-    env = VGDLJaxEnv(game_file, level_file)
+    env = VGDLxEnv(game_file, level_file)
     print(f"  n_types={len(env.compiled.game_def.sprites)}, "
           f"max_n={env.compiled.init_state.alive.shape[1]}, "
           f"n_actions={env.n_actions}")

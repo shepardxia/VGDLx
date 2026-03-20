@@ -14,7 +14,7 @@ from timeit import default_timer as timer
 
 import jax
 
-from vgdl_jax.env import VGDLJaxEnv
+from vgdl_jax.env import VGDLxEnv
 
 GAMES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'py-vgdl', 'vgdl', 'games')
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), 'results', 'jax')
@@ -48,7 +48,7 @@ def profile_game(game_name, game_file, level_file, overwrite=False):
     else:
         results = {}
 
-    env = VGDLJaxEnv(game_file, level_file)
+    env = VGDLxEnv(game_file, level_file)
     print(f"\n{'='*60}")
     print(f"  {game_name}  |  n_types={len(env.compiled.game_def.sprites)}  "
           f"|  max_n={env.compiled.init_state.alive.shape[1]}  "
