@@ -31,7 +31,11 @@ from vgdl_jax.validate.discovery import discover_games
 
 # ── Sprite image loading ───────────────────────────────────────────
 
-SPRITE_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'GVGAI', 'sprites')
+# Bundled sprites in vgdl_jax/sprites/, fallback to GVGAI/sprites/
+_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SPRITE_DIR = os.path.join(_PKG_DIR, 'vgdl_jax', 'sprites')
+if not os.path.isdir(SPRITE_DIR):
+    SPRITE_DIR = os.path.join(_PKG_DIR, '..', 'GVGAI', 'sprites')
 
 
 def _load_sprite_image(img_path, block_size):
@@ -230,10 +234,15 @@ def main():
                 print(f'ERROR: No level file found. Tried {level_file}')
                 sys.exit(1)
     else:
-        # Look up by name in GVGAI games
-        gvgai_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'GVGAI', 'examples', 'gridphysics')
-        entries = discover_games(gvgai_dir, source='gvgai')
-        game_map = {e.name: e for e in entries}
+        # Look up by name: bundled games first, then GVGAI
+        bundled_dir = os.path.join(_PKG_DIR, 'vgdl_jax', 'games', 'gridphysics')
+        gvgai_dir = os.path.join(_PKG_DIR, '..', 'GVGAI', 'examples', 'gridphysics')
+        game_map = {}
+        for d in [bundled_dir, gvgai_dir]:
+            if os.path.isdir(d):
+                for e in discover_games(d, source='gvgai'):
+                    if e.name not in game_map:
+                        game_map[e.name] = e
         if args.game not in game_map:
             available = sorted(game_map.keys())[:20]
             print(f"ERROR: Unknown game '{args.game}'. Available: {', '.join(available)}...")
