@@ -42,13 +42,13 @@ def _load_sprite_image(img_path, block_size):
     """Load and scale a sprite image, or return None."""
     if not img_path:
         return None
-    # img_path is like "oryx/spaceship1" — append .png
-    full_path = os.path.join(SPRITE_DIR, img_path.replace('/', os.sep))
-    if not full_path.endswith('.png'):
-        full_path += '.png'
-    if os.path.exists(full_path):
-        img = pygame.image.load(full_path).convert_alpha()
-        return pygame.transform.scale(img, (block_size, block_size))
+    base = os.path.join(SPRITE_DIR, img_path.replace('/', os.sep))
+    # Try: exact.png, then _0.png (GVGAI animation frame 0)
+    for suffix in ['.png', '_0.png']:
+        path = base + suffix
+        if os.path.exists(path):
+            img = pygame.image.load(path).convert_alpha()
+            return pygame.transform.scale(img, (block_size, block_size))
     return None
 
 
@@ -63,10 +63,7 @@ def _build_sprite_surfaces(game_def, block_size):
             # Solid color fallback
             surf = pygame.Surface((block_size, block_size), pygame.SRCALPHA)
             r, g, b = sd.color
-            if sd.hidden:
-                surf.fill((r, g, b, 40))  # semi-transparent for hidden
-            else:
-                surf.fill((r, g, b, 255))
+            surf.fill((r, g, b, 255))
             surfaces[sd.type_idx] = surf
     return surfaces
 
@@ -139,7 +136,7 @@ def render_pygame(state, game_def, surfaces, static_grid_map, block_size, height
 
 # ── Main game loop ─────────────────────────────────────────────────
 
-def play(env, game_def, scale=2, fps=10):
+def play(env, game_def, scale=2, fps=15):
     """Run the interactive game loop."""
     from vgdl_jax.data_model import get_block_size
     block_size = get_block_size(game_def)
@@ -186,8 +183,7 @@ def play(env, game_def, scale=2, fps=10):
 
         pygame.display.flip()
 
-        # Handle input
-        action = None
+        # Handle input — check held keys for continuous movement
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -199,12 +195,17 @@ def play(env, game_def, scale=2, fps=10):
                     obs, state = env.reset(key)
                     step_count = 0
                     total_reward = 0
-                    action = None
-                elif event.key in key_map:
-                    action = key_map[event.key]
 
-        # Step if action was pressed and game not done
-        if action is not None and not state.done:
+        # Read held keys — game steps every frame (NPCs move even without input)
+        action = env.noop_action  # default NOOP
+        keys_pressed = pygame.key.get_pressed()
+        for pygame_key, act_idx in key_map.items():
+            if keys_pressed[pygame_key]:
+                action = act_idx
+                break  # first held key wins
+
+        # Step every frame (not just on keypress)
+        if not state.done:
             obs, state, reward, done, info = env.step(state, action)
             step_count += 1
             total_reward += int(reward)
