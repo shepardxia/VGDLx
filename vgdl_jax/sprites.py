@@ -109,6 +109,29 @@ def update_missile(state: GameState, type_idx, cooldown):
                            first_tick_mask=first_tick)
 
 
+def update_random_missile(state: GameState, type_idx, cooldown):
+    """RandomMissile: pick a random direction on first update (orientation==DNIL),
+    then move as a normal missile. Matches GVGAI RandomMissile.update()."""
+    rng, key = jax.random.split(state.rng)
+    max_n = state.alive.shape[1]
+
+    # Detect DNIL orientation: (0,0) in VGDLx
+    ori = state.orientations[type_idx]
+    is_dnil = (ori[:, 0] == 0.0) & (ori[:, 1] == 0.0) & state.alive[type_idx]
+
+    # Pick random direction for DNIL sprites
+    dir_indices = jax.random.randint(key, (max_n,), 0, N_DIRECTIONS)
+    random_ori = DIRECTION_DELTAS_F32[dir_indices]
+    new_ori = jnp.where(is_dnil[:, None], random_ori, ori)
+    state = state.replace(orientations=state.orientations.at[type_idx].set(new_ori), rng=rng)
+
+    # Now move as a normal missile
+    new_pos, new_timers, _, first_tick = _move_with_cooldown(
+        state, type_idx, cooldown)
+    return _apply_npc_move(state, type_idx, new_pos, new_timers,
+                           first_tick_mask=first_tick)
+
+
 def update_erratic_missile(state: GameState, type_idx, cooldown, prob):
     """Missile that randomly changes direction with probability `prob` each tick."""
     rng, key_move, key_dir = jax.random.split(state.rng, 3)

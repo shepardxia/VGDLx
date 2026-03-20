@@ -19,7 +19,7 @@ from vgdl_jax.effects import apply_masked_effect, apply_static_a_effect, POSITIO
 from vgdl_jax.sprites import (
     DIRECTION_DELTAS, DIRECTION_DELTAS_F32, spawn_sprite,
     update_inertial_avatar, update_mario_avatar,
-    update_missile, update_erratic_missile, update_random_npc,
+    update_missile, update_random_missile, update_erratic_missile, update_random_npc,
     update_random_inertial, update_spreader, update_chaser,
     update_spawn_point, update_walk_jumper,
     _manhattan_distance_field, _relax_distance_field, flicker_age,
@@ -83,11 +83,12 @@ def _build_slot_grid(effective_b, eff_b, r_b, c_b, height, width):
     """Build [H, W] int32 grid mapping each cell to the slot index of the sprite there.
 
     Returns slot_grid where slot_grid[r, c] is the slot index of the type_b sprite
-    at that cell (-1 if empty).
+    at that cell (-1 if empty). Uses .max() so alive slot indices (>=0) dominate
+    dead slots' -1 values. For multiple alive at same cell, highest slot wins.
     """
     slot_grid = jnp.full((height, width), -1, dtype=jnp.int32)
     slot_indices = jnp.where(effective_b, jnp.arange(eff_b, dtype=jnp.int32), -1)
-    return slot_grid.at[r_b, c_b].set(slot_indices)
+    return slot_grid.at[r_b, c_b].max(slot_indices)
 
 
 def _pre_movement(state, type_idx):
@@ -1045,7 +1046,7 @@ _NPC_UPDATERS = {
     SpriteClass.WALKER: lambda s, ti, cfg, h, w, bs: update_missile(s, ti, cfg.cooldown),
     SpriteClass.SPREADER: lambda s, ti, cfg, h, w, bs: update_spreader(s, ti, flicker_limit=cfg.flicker_limit, spreadprob=cfg.spreadprob, target_type=cfg.target_type_idx, block_size=bs),
     SpriteClass.RANDOM_INERTIAL: lambda s, ti, cfg, h, w, bs: update_random_inertial(s, ti, mass=cfg.mass, strength=cfg.strength),
-    SpriteClass.RANDOM_MISSILE: lambda s, ti, cfg, h, w, bs: update_missile(s, ti, cfg.cooldown),
+    SpriteClass.RANDOM_MISSILE: lambda s, ti, cfg, h, w, bs: update_random_missile(s, ti, cfg.cooldown),
     SpriteClass.WALK_JUMPER: lambda s, ti, cfg, h, w, bs: update_walk_jumper(s, ti, prob=cfg.prob, strength=cfg.strength, gravity=cfg.gravity, mass=cfg.mass),
 }
 

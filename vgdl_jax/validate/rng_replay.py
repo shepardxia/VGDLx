@@ -123,6 +123,15 @@ class RNGRecorder:
                     'class': sc, 'key': sprite_key,
                     'spawn_rolls': spawn_rolls,
                 }
+
+            elif sc == SpriteClass.RANDOM_MISSILE:
+                # update_random_missile picks a random direction for DNIL sprites
+                rng, key = jax.random.split(rng)
+                dir_indices = np.array(jax.random.randint(key, (self.max_n,), 0, 4))
+                record[type_idx] = {
+                    'class': sc, 'key': sprite_key,
+                    'dir_indices': dir_indices,
+                }
             # MISSILE, FLICKER, ORIENTED_FLICKER, WALKER: no RNG
 
         # Effects: teleport_to_exit consumes RNG
@@ -586,6 +595,42 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
                 })
             record[sd.key] = entries
 
+        # RandomMissile: direction pick on first update (DNIL → random dir)
+        elif sc == SpriteClass.RANDOM_MISSILE:
+            pre_ori = np.array(pre_state.orientations)
+            # Sprites that just picked a direction: were DNIL (0,0) in pre,
+            # non-DNIL in post, and alive in post
+            alive_mask = post_alive[ti]
+            slots = np.where(alive_mask)[0]
+            if len(slots) == 0:
+                continue
+            entries = []
+            for slot in slots:
+                # Check if orientation changed from DNIL to something
+                pre_or = pre_ori[ti, slot]
+                post_or = post_ori[ti, slot]
+                # DNIL = (0, 0) in VGDLx
+                was_dnil = (abs(float(pre_or[0])) < 0.01 and abs(float(pre_or[1])) < 0.01)
+                is_now_set = (abs(float(post_or[0])) > 0.01 or abs(float(post_or[1])) > 0.01)
+                if was_dnil and is_now_set:
+                    ori_r, ori_c = post_or[0], post_or[1]
+                    basedirs_idx = _ORI_TO_BASEDIRS.get(
+                        (round(float(ori_r)), round(float(ori_c))), -1)
+                    if basedirs_idx < 0:
+                        continue
+                    # Use pre_pos for pre-existing, post_pos for newly spawned
+                    if pre_alive[ti][slot]:
+                        r, c = pre_pos[ti, slot, 0], pre_pos[ti, slot, 1]
+                    else:
+                        r, c = post_pos[ti, slot, 0], post_pos[ti, slot, 1]
+                    entries.append({
+                        "pos": [float(r), float(c)],
+                        "dir": basedirs_idx,
+                        "consume": True,
+                    })
+            if entries:
+                record[sd.key] = entries
+
     # --- Effect-level RNG: teleportToExit ---
     # Detect teleport outcomes by comparing actor positions to exit portal positions.
     # The recorded pos is the entrance portal position (= avatar's position when effect
@@ -667,6 +712,96 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
                     "pos": [float(pr), float(pc)],
                     "flip_dir": basedirs_idx,
                 })
+
+    # --- Effect-level RNG: spawn/spawnIfHasMore/etc. with prob < 1.0 ---
+    # Detect effect-spawned sprites by comparing pre/post alive counts of
+    # the target type. For each actor sprite that collides with an actee,
+    # record whether the spawn succeeded (roll < prob) or not (roll >= prob).
+    #
+    # GVGAI's Spawn.execute() calls game.getRandomGenerator().nextDouble()
+    # and checks >= prob. We inject roll=0.0 (succeed) or 1.0 (fail).
+    # The record is keyed by the ACTOR type's sprite key + position.
+    _PROB_SPAWN_EFFECTS = {'spawn', 'spawn_if_has_more', 'spawn_if_has_less'}
+    for ed in game_def.effects:
+        if ed.effect_type not in _PROB_SPAWN_EFFECTS:
+            continue
+        prob = float(ed.kwargs.get('prob', 1.0))
+        if prob >= 1.0:
+            continue
+        stype = ed.kwargs.get('stype', '')
+        if not stype:
+            continue
+        spawn_indices = game_def.resolve_stype(stype)
+        if not spawn_indices:
+            continue
+        spawn_ti = spawn_indices[0]
+
+        actor_indices = game_def.resolve_stype(ed.actor_stype)
+        actee_indices = game_def.resolve_stype(ed.actee_stype)
+
+        # Newly alive spawn targets
+        newly_alive = post_alive[spawn_ti] & ~pre_alive[spawn_ti]
+        new_target_slots = np.where(newly_alive)[0]
+        target_positions = set()
+        for ns in new_target_slots:
+            r, c = post_pos[spawn_ti, ns, 0], post_pos[spawn_ti, ns, 1]
+            target_positions.add((int(r), int(c)))
+
+        # For each actor sprite, check if it collides with any actee
+        # and whether a spawn target appeared at the actor's position
+        for actor_ti in actor_indices:
+            actor_key = game_def.sprites[actor_ti].key
+            # Static actor types: get positions from static grid
+            from vgdl_jax.data_model import STATIC_CLASSES
+            actor_sc = game_def.sprites[actor_ti].sprite_class
+            if actor_sc in STATIC_CLASSES:
+                # Static type: positions come from the grid
+                # We need to check which actee sprites overlap with the static grid
+                # For static actors, the "position" for GVGAI is the grid cell * block_size
+                for actee_ti in actee_indices:
+                    alive_mask = pre_alive[actee_ti]
+                    for slot in np.where(alive_mask)[0]:
+                        actee_r = int(pre_pos[actee_ti, slot, 0])
+                        actee_c = int(pre_pos[actee_ti, slot, 1])
+                        # The actor (static) is at the same cell as the actee
+                        # In GVGAI, sprite1 is the actor (static) at the collision cell
+                        # The spawn happens at sprite1's position = cell * block_size
+                        cell_r = actee_r // block_size * block_size
+                        cell_c = actee_c // block_size * block_size
+                        did_spawn = (cell_r, cell_c) in target_positions
+                        roll = 0.0 if did_spawn else 1.0
+                        record.setdefault(actor_key, []).append({
+                            "pos": [float(cell_r), float(cell_c)],
+                            "effect_spawn_roll": roll,
+                            "effect_stype": stype,
+                        })
+            else:
+                # Non-static actor: use pre_pos
+                alive_mask = pre_alive[actor_ti]
+                for slot in np.where(alive_mask)[0]:
+                    actor_r = int(pre_pos[actor_ti, slot, 0])
+                    actor_c = int(pre_pos[actor_ti, slot, 1])
+                    # Check if any actee is at the same cell
+                    actor_cell = (actor_r // block_size, actor_c // block_size)
+                    has_actee = False
+                    for actee_ti in actee_indices:
+                        actee_alive = pre_alive[actee_ti]
+                        for as2 in np.where(actee_alive)[0]:
+                            actee_cell = (int(pre_pos[actee_ti, as2, 0]) // block_size,
+                                          int(pre_pos[actee_ti, as2, 1]) // block_size)
+                            if actee_cell == actor_cell:
+                                has_actee = True
+                                break
+                        if has_actee:
+                            break
+                    if has_actee:
+                        did_spawn = (actor_r, actor_c) in target_positions
+                        roll = 0.0 if did_spawn else 1.0
+                        record.setdefault(actor_key, []).append({
+                            "pos": [float(actor_r), float(actor_c)],
+                            "effect_spawn_roll": roll,
+                            "effect_stype": stype,
+                        })
 
     return record
 
