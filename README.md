@@ -1,118 +1,123 @@
 # VGDLx
 
-*Pronounced "VG-deluxe"*
+JAX-compiled [VGDL](https://en.wikipedia.org/wiki/Video_Game_Description_Language) game engine for GPU-accelerated RL. 67/68 supported GVGAI games match exactly over 40-step validation trajectories.
 
-A JAX-compiled [VGDL](http://www.intfiction.org/forum/viewtopic.php?f=11&t=6497) (Video Game Description Language) engine for GPU-accelerated batched reinforcement learning.
-
-VGDLx ports [py-vgdl](https://github.com/schaul/py-vgdl) to JAX, replacing OOP sprites with entity arrays and pygame collision with grid/AABB overlap detection. The result is a fully `jit`-able and `vmap`-able game step function that runs thousands of environments in parallel.
-
-## Features
-
-- **9 supported games**: Chase, Zelda, Aliens, MissileCommand, Sokoban, Portals, BoulderDash, SurviveZombies, Frogs
-- **3 physics modes**: GridPhysics, ContinuousPhysics (InertialAvatar), GravityPhysics (MarioAvatar)
-- **37 effects**: killSprite, stepBack, transformTo, wallStop, wallBounce, bounceDirection, teleportToExit, and more
-- **gymnax-style API**: `reset(rng) -> (obs, state)`, `step(state, action) -> (obs, state, reward, done, info)`
-- **No pygame dependency**: standalone parser and renderer
-
-## Installation
+## Install
 
 ```bash
 uv pip install -e '.[dev]'
 ```
 
-Requires Python 3.9+ and JAX.
+## Play
 
-## Quick Start
+```bash
+python scripts/play.py zelda
+python scripts/play.py aliens --scale 3
+python scripts/play.py boulderdash --fps 20
+```
+
+Controls: Arrow/WASD = move, Space = use, N = noop, R = restart, Q = quit.
+
+## Environment API
+
+```python
+from vgdl_jax.env import VGDLxEnv
+
+# Create from bundled games
+env = VGDLxEnv('vgdl_jax/games/gridphysics/zelda.txt',
+               'vgdl_jax/games/gridphysics/zelda_lvl0.txt')
+
+# Or from strings
+env = VGDLxEnv.from_text(game_text, level_text)
+```
+
+### Properties
+
+```python
+env.n_actions    # total number of actions
+env.noop_action  # index of the NOOP action
+env.obs_shape    # observation shape
+env.action_map   # {0: 'LEFT', 1: 'RIGHT', 2: 'DOWN', 3: 'UP', 4: 'USE', 5: 'NIL'}
+```
+
+Action ordering is consistent across all avatar types: directional actions first (LEFT, RIGHT, DOWN, UP), then USE if available, then NIL.
+
+### Reset & Step
 
 ```python
 import jax
-from vgdl_jax.env import VGDLJaxEnv
 
-env = VGDLJaxEnv("path/to/game.txt", "path/to/level.txt")
-rng = jax.random.PRNGKey(0)
-obs, state = env.reset(rng)
+obs, state = env.reset()                              # default RNG key
+obs, state = env.reset(jax.random.PRNGKey(42))        # explicit key
+obs, state, reward, done, info = env.step(state, action)
+```
 
-# Single step
-obs, state, reward, done, info = env.step(state, action=0)
+### Observation Formats
 
-# Batched (vmap)
-batch_reset = jax.vmap(env.reset)
-batch_step = jax.vmap(env.step)
+```python
+# Binary channels (default) — one channel per sprite type
+env = VGDLxEnv(game, level, obs_type='channels')  # [n_types, H, W] bool
+
+# Grid — per-cell type ID list (like GVGAI's getObservationGrid)
+env = VGDLxEnv(game, level, obs_type='grid')       # [H, W, max_occupancy] int32
+
+# Entity list — for attention/transformer architectures
+env = VGDLxEnv(game, level, obs_type='entities')   # [max_entities, 3] int32
+```
+
+### Batched Environments
+
+VGDLx follows the standard JAX RL pattern — the env is always single, batching is done via `jax.vmap`:
+
+```python
+# Batch reset
+keys = jax.random.split(jax.random.PRNGKey(0), 256)
+obs_batch, state_batch = jax.vmap(env.reset)(keys)
+
+# Batch step
+step_fn = jax.jit(jax.vmap(env.step))
+obs_batch, state_batch, rewards, dones, infos = step_fn(state_batch, actions)
+```
+
+### Rendering
+
+```python
+img = env.render(state)              # [H*bs, W*bs, 3] uint8 RGB
+img = env.render(state, block_size=20)
+```
+
+## Bundled Games
+
+118 GVGAI games are included in `vgdl_jax/games/gridphysics/`. 68 currently compile, 67 match GVGAI exactly.
+
+```python
+from vgdl_jax.validate.discovery import discover_games
+games = discover_games('vgdl_jax/games/gridphysics/', source='gvgai')
+print(f'{len(games)} games available')
+```
+
+## Validation
+
+```bash
+# Run cross-engine validation against GVGAI
+python scripts/validate_all.py --source gvgai --compat-filter supported
+
+# Debug a specific game
+python scripts/debug_divergence.py zelda --context 3 --all-types
 ```
 
 ## Architecture
 
 ```
-VGDL text file
-    │
-    ▼
-  Parser (pure Python, runs once)
-    │  GameDef dataclasses
-    ▼
-  Compiler (pure Python, runs once)
-    │  Closures capturing jnp arrays
-    ▼
-  Step function (JAX, jit-compiled)
-    state, action → new_state
+game.txt + level.txt
+    → parse_vgdl()     [parser.py]    → GameDef
+    → compile_game()   [compiler.py]  → CompiledGame (init_state + jitted step_fn)
+    → VGDLxEnv         [env.py]       → reset/step/render
 ```
 
-Only the step function runs in JAX. The parser and compiler are standard Python executed once at setup.
-
-**Key design choices:**
-- Sprites stored as entity arrays `[n_types, max_n, ...]` with alive masks
-- Collision: grid-based occupancy `O(max_n)` for grid physics, per-pair AABB for continuous physics
-- Effects: boolean masks over sprite arrays (no Python loops at runtime)
-- Speed as movement multiplier: `delta * speed` per tick, with sweep collision for speed > 1
-
-## Testing
-
-```bash
-# All tests
-python -m pytest tests/
-
-# Skip cross-engine validation (under development)
-python -m pytest tests/ --ignore=tests/test_validate.py
-
-# Benchmarks
-python benchmarks/throughput.py
-```
-
-241 tests covering parsing, compilation, collision, effects, terminations, per-game integration, and cross-engine validation.
-
-## Throughput
-
-Steps/second on CPU (Apple M1, 256 parallel environments):
-
-| Game | FPS |
-|------|-----|
-| Sokoban | ~138K |
-| Aliens | ~37K |
-| Zelda | ~34K |
-| Portals | ~31K |
-| Frogs | ~27K |
-| SurviveZombies | ~19K |
-| MissileCommand | ~16K |
-| Chase | ~15K |
-| BoulderDash | ~15K |
-
-## Documentation
-
-- [`tests/MECHANICS_DIFF.md`](tests/MECHANICS_DIFF.md) — Four-way engine comparison (VGDL 1.0 · 2.0 · GVGAI · VGDLx): 33 divergences, validation results, feature coverage
-
-## VGDL Game Format
-
-Games are defined in two text files:
-
-**Domain file** (`.txt`) — 4 sections:
-- `SpriteSet`: sprite hierarchy with class assignments
-- `InteractionSet`: collision pairs → effects
-- `LevelMapping`: character → sprite type
-- `TerminationSet`: win/loss conditions
-
-**Level file** (`_lvl0.txt`) — ASCII grid using the level mapping characters.
-
-Example games are in the companion [py-vgdl](https://github.com/schaul/py-vgdl) repository under `vgdl/games/`.
-
-## License
-
-MIT
+Key design choices:
+- **Int32 pixel coordinates** — no float drift, matches GVGAI exactly
+- **Static grid optimization** — walls as `[H,W]` bool grids, not position arrays
+- **O(max_n) collision** — occupancy grids, not pairwise
+- **Python `if` for trace-time dispatch** — dead code elimination from JIT graph
+- **Fully vmap-able** — batched RL at 50K–500K steps/sec on CPU
