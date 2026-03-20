@@ -323,15 +323,17 @@ def kill_all(state, type_a, mask, score_delta, kwargs, **_):
     return _with_score(state, score_delta)
 
 
-def kill_if_frontal(state, prev_positions, type_a, type_b, mask, score_change,
-                    partner_idx=None, **_):
-    """Kill sprite1 if sprites are moving in opposite directions (or sprite1 is static)."""
+def _kill_if_frontal_core(state, prev_positions, type_a, type_b, mask,
+                          score_change, partner_idx, frontal):
+    """Shared logic for killIfFrontal / killIfNotFrontal.
+
+    frontal=True: kill when sprites move in opposite directions (or sprite1 is static).
+    frontal=False: kill when sprites do NOT move in opposite directions (or sprite1 is static).
+    """
     if type_b >= 0 and partner_idx is not None:
-        # sprite1's last direction (current - prev), normalized to sign
         delta_a = (state.positions[type_a] - prev_positions[type_a]).astype(jnp.float32)
         norm_a = jnp.sqrt(jnp.sum(delta_a ** 2, axis=-1, keepdims=True))
         dir_a = jnp.where(norm_a > 0.5, delta_a / norm_a, 0.0)
-        # partner's last direction
         partner_delta = _partner_vals(
             (state.positions[type_b] - prev_positions[type_b]).astype(jnp.float32),
             partner_idx)
@@ -341,35 +343,27 @@ def kill_if_frontal(state, prev_positions, type_a, type_b, mask, score_change,
         sum_dir = dir_a + dir_b
         sum_mag = jnp.sqrt(jnp.sum(sum_dir ** 2, axis=-1))
         a_is_static = (norm_a[:, 0] < 0.5)
-        # Kill if sprite1 is static OR directions are opposite (sum near zero)
-        should_kill = mask & (partner_idx >= 0) & (a_is_static | (sum_mag < 0.5))
+        is_opposite = sum_mag < 0.5
+        direction_match = is_opposite if frontal else ~is_opposite
+        should_kill = mask & (partner_idx >= 0) & (a_is_static | direction_match)
     else:
         should_kill = jnp.zeros_like(mask)
     return _with_score(prim_kill(state, type_a, should_kill),
                        should_kill.sum() * jnp.int32(score_change))
+
+
+def kill_if_frontal(state, prev_positions, type_a, type_b, mask, score_change,
+                    partner_idx=None, **_):
+    """Kill sprite1 if sprites are moving in opposite directions (or sprite1 is static)."""
+    return _kill_if_frontal_core(state, prev_positions, type_a, type_b, mask,
+                                 score_change, partner_idx, frontal=True)
 
 
 def kill_if_not_frontal(state, prev_positions, type_a, type_b, mask, score_change,
                         partner_idx=None, **_):
     """Kill sprite1 if sprites are NOT moving in opposite directions (or sprite1 is static)."""
-    if type_b >= 0 and partner_idx is not None:
-        delta_a = (state.positions[type_a] - prev_positions[type_a]).astype(jnp.float32)
-        norm_a = jnp.sqrt(jnp.sum(delta_a ** 2, axis=-1, keepdims=True))
-        dir_a = jnp.where(norm_a > 0.5, delta_a / norm_a, 0.0)
-        partner_delta = _partner_vals(
-            (state.positions[type_b] - prev_positions[type_b]).astype(jnp.float32),
-            partner_idx)
-        norm_b = jnp.sqrt(jnp.sum(partner_delta ** 2, axis=-1, keepdims=True))
-        dir_b = jnp.where(norm_b > 0.5, partner_delta / norm_b, 0.0)
-        sum_dir = dir_a + dir_b
-        sum_mag = jnp.sqrt(jnp.sum(sum_dir ** 2, axis=-1))
-        a_is_static = (norm_a[:, 0] < 0.5)
-        # Kill if sprite1 is static OR directions are NOT opposite (sum NOT near zero)
-        should_kill = mask & (partner_idx >= 0) & (a_is_static | (sum_mag >= 0.5))
-    else:
-        should_kill = jnp.zeros_like(mask)
-    return _with_score(prim_kill(state, type_a, should_kill),
-                       should_kill.sum() * jnp.int32(score_change))
+    return _kill_if_frontal_core(state, prev_positions, type_a, type_b, mask,
+                                 score_change, partner_idx, frontal=False)
 
 
 def transform_to_singleton(state, type_a, mask, score_delta, kwargs, **_):
@@ -589,16 +583,8 @@ def transform_to(state, type_a, type_b, mask, score_delta, kwargs,
                        src_resources=state.resources[type_a],
                        target_cons=target_cons,
                        target_spawn_cd=target_spawn_cd)
-    if kill_second and type_b >= 0:
-        # GVGAI TransformTo.killSecond: also kill sprite2 (the collision partner)
-        if partner_idx is not None:
-            b_mask = mask & (partner_idx >= 0)
-            kill_b = jnp.zeros(state.alive.shape[1], dtype=jnp.bool_)
-            kill_b = kill_b.at[partner_idx].max(b_mask)
-            state = prim_kill(state, type_b, kill_b)
-        else:
-            # Fallback: kill all alive type_b at colliding positions
-            pass
+    if kill_second and type_b >= 0 and partner_idx is not None:
+        state = prim_kill_partner(state, type_b, partner_idx, mask)
     return state
 
 
@@ -614,57 +600,44 @@ def clone_sprite(state, type_a, mask, score_delta, kwargs=None, **_):
     return _with_score(state, score_delta)
 
 
-def spawn(state, type_a, mask, score_delta, kwargs, max_n, **_):
+def _spawn_core(state, type_a, mask, kwargs, max_n=None):
+    """Shared spawn logic: apply prob gate, then fill slots in spawn target type."""
     spawn_type = kwargs.get('spawn_type_idx', -1)
-    target_speed = kwargs.get('target_speed', None)
-    target_cons = kwargs.get('target_cons', 0)
-    target_spawn_cd = kwargs.get('target_spawn_cd', 0)
+    if spawn_type < 0:
+        return state, mask
     prob = kwargs.get('prob', 1.0)
-    if spawn_type >= 0:
-        if prob < 1.0:
-            rng, key = jax.random.split(state.rng)
-            state = state.replace(rng=rng)
-            rolls = jax.random.uniform(key, (max_n,))
-            mask = mask & (rolls < prob)
-        state = _fill_slots(state, spawn_type, mask,
-                            state.positions[type_a],
-                            target_speed=target_speed, reset_cooldown=True,
-                            target_cons=target_cons,
-                            target_spawn_cd=target_spawn_cd)
+    if prob < 1.0 and max_n is not None:
+        rng, key = jax.random.split(state.rng)
+        state = state.replace(rng=rng)
+        rolls = jax.random.uniform(key, (max_n,))
+        mask = mask & (rolls < prob)
+    state = _fill_slots(state, spawn_type, mask,
+                        state.positions[type_a],
+                        target_speed=kwargs.get('target_speed', None),
+                        reset_cooldown=True,
+                        target_cons=kwargs.get('target_cons', 0),
+                        target_spawn_cd=kwargs.get('target_spawn_cd', 0))
+    return state, mask
+
+
+def spawn(state, type_a, mask, score_delta, kwargs, max_n, **_):
+    state, _ = _spawn_core(state, type_a, mask, kwargs, max_n=max_n)
     return _with_score(state, score_delta)
 
 
 def spawn_if_has_more(state, type_a, mask, score_delta, kwargs, **_):
     r_idx = kwargs.get('resource_idx', 0)
     limit = kwargs.get('limit', 0)
-    spawn_type = kwargs.get('spawn_type_idx', -1)
-    target_speed = kwargs.get('target_speed', None)
-    target_cons = kwargs.get('target_cons', 0)
-    target_spawn_cd = kwargs.get('target_spawn_cd', 0)
-    if spawn_type >= 0:
-        has_enough = mask & (state.resources[type_a, :, r_idx] >= limit)
-        state = _fill_slots(state, spawn_type, has_enough,
-                            state.positions[type_a],
-                            target_speed=target_speed, reset_cooldown=True,
-                            target_cons=target_cons,
-                            target_spawn_cd=target_spawn_cd)
+    mask = mask & (state.resources[type_a, :, r_idx] >= limit)
+    state, _ = _spawn_core(state, type_a, mask, kwargs)
     return _with_score(state, score_delta)
 
 
 def spawn_if_has_less(state, type_a, mask, score_delta, kwargs, **_):
     r_idx = kwargs.get('resource_idx', 0)
     limit = kwargs.get('limit', 0)
-    spawn_type = kwargs.get('spawn_type_idx', -1)
-    target_speed = kwargs.get('target_speed', None)
-    target_cons = kwargs.get('target_cons', 0)
-    target_spawn_cd = kwargs.get('target_spawn_cd', 0)
-    if spawn_type >= 0:
-        has_less = mask & (state.resources[type_a, :, r_idx] <= limit)
-        state = _fill_slots(state, spawn_type, has_less,
-                            state.positions[type_a],
-                            target_speed=target_speed, reset_cooldown=True,
-                            target_cons=target_cons,
-                            target_spawn_cd=target_spawn_cd)
+    mask = mask & (state.resources[type_a, :, r_idx] <= limit)
+    state, _ = _spawn_core(state, type_a, mask, kwargs)
     return _with_score(state, score_delta)
 
 

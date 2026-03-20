@@ -751,8 +751,6 @@ def build_gvgai_rng_record(pre_state, post_state, game_def, block_size,
         # and whether a spawn target appeared at the actor's position
         for actor_ti in actor_indices:
             actor_key = game_def.sprites[actor_ti].key
-            # Static actor types: get positions from static grid
-            from vgdl_jax.data_model import STATIC_CLASSES
             actor_sc = game_def.sprites[actor_ti].sprite_class
             if actor_sc in STATIC_CLASSES:
                 # Static type: positions come from the grid

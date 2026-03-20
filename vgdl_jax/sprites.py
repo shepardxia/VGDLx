@@ -125,11 +125,7 @@ def update_random_missile(state: GameState, type_idx, cooldown):
     new_ori = jnp.where(is_dnil[:, None], random_ori, ori)
     state = state.replace(orientations=state.orientations.at[type_idx].set(new_ori), rng=rng)
 
-    # Now move as a normal missile
-    new_pos, new_timers, _, first_tick = _move_with_cooldown(
-        state, type_idx, cooldown)
-    return _apply_npc_move(state, type_idx, new_pos, new_timers,
-                           first_tick_mask=first_tick)
+    return update_missile(state, type_idx, cooldown)
 
 
 def update_erratic_missile(state: GameState, type_idx, cooldown, prob):

@@ -828,24 +828,6 @@ def _shoot(state, action, cfg, avatar_type, block_size=1):
     return state
 
 
-def _update_missile_avatar(state, action, cfg, height, width, block_size=1):
-    """Update MissileAvatar: ignores player input, auto-moves in orientation direction.
-
-    GVGAI MissileAvatar.updateAvatar() calls requestPlayerInput() (but discards
-    the result), then super.updatePassive() which does physics.passiveMovement —
-    i.e., moves in the current orientation direction every tick subject to cooldown
-    and isFirstTick. Player actions have no effect.
-    """
-    for at in cfg.avatar_type_indices:
-        cooldown = cfg.cooldown
-        # Auto-move in orientation direction (like update_missile)
-        new_pos, new_timers, _, first_tick = _move_with_cooldown(
-            state, at, cooldown)
-        state = _apply_npc_move(state, at, new_pos, new_timers,
-                                first_tick_mask=first_tick)
-    return state
-
-
 def _update_avatar_single(state, action, cfg, avatar_type, height, width, block_size=1):
     """Update a single avatar type's position and optionally shoot."""
     n_move = cfg.n_move_actions
