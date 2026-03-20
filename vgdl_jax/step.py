@@ -714,8 +714,10 @@ def _apply_all_effects(state, prev_positions, effects, height, width, max_n,
 
             eff_kwargs = kwargs
             if static_b_idx is not None and effect_type in (
-                    'kill_both', 'wall_stop', 'wall_bounce', 'bounce_direction'):
-                eff_kwargs = dict(kwargs, static_b_grid_idx=static_b_idx)
+                    'kill_both', 'wall_stop', 'wall_bounce', 'bounce_direction',
+                    'transform_to'):
+                eff_kwargs = dict(kwargs, static_b_grid_idx=static_b_idx,
+                                 height=height, width=width)
 
             # Snapshot alive before this effect to detect newly spawned sprites.
             alive_before = state.alive

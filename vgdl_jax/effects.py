@@ -583,8 +583,19 @@ def transform_to(state, type_a, type_b, mask, score_delta, kwargs,
                        src_resources=state.resources[type_a],
                        target_cons=target_cons,
                        target_spawn_cd=target_spawn_cd)
-    if kill_second and type_b >= 0 and partner_idx is not None:
-        state = prim_kill_partner(state, type_b, partner_idx, mask)
+    if kill_second:
+        static_b_sg = kwargs.get('static_b_grid_idx', None)
+        if static_b_sg is not None:
+            # type_b is a static grid — clear cells at type_a positions
+            pos_a = state.positions[type_a]
+            cells = pos_a // kwargs.get('block_size', 1)
+            r = jnp.clip(cells[:, 0], 0, kwargs.get('height', 1) - 1)
+            c = jnp.clip(cells[:, 1], 0, kwargs.get('width', 1) - 1)
+            clear = jnp.zeros_like(state.static_grids[static_b_sg])
+            clear = clear.at[r, c].max(mask)
+            state = prim_clear_static(state, static_b_sg, clear)
+        elif type_b >= 0 and partner_idx is not None:
+            state = prim_kill_partner(state, type_b, partner_idx, mask)
     return state
 
 
@@ -1025,6 +1036,7 @@ def _ckw_transform_to(ed, ctx):
             kill_second = kill_second.lower() == 'true'
         if kill_second:
             result['kill_second'] = True
+            result['block_size'] = ctx.block_size
         return result
     return {}
 
