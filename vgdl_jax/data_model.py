@@ -174,7 +174,9 @@ SPRITE_REGISTRY: Dict[SpriteClass, SpriteClassDef] = {
     ),
     SpriteClass.BOMBER: SpriteClassDef(
         vgdl_names=('Bomber',),
-        default_speed=1.0,
+        # GVGAI Bomber extends SpawnPoint extends SpriteProducer extends VGDLSprite.
+        # VGDLSprite.init() sets speed=0. Bomber does NOT inherit from Missile (speed=1).
+        # A Bomber only moves if 'speed' is explicitly set in the VGDL definition.
         is_moving_npc=True,
         is_oriented=True,
     ),

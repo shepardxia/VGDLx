@@ -104,11 +104,12 @@ def _find_static_types(game_def):
                 for idx in game_def.resolve_stype(other_stype):
                     spawn_targets.add(idx)
     for sd in game_def.sprites:
-        if sd.sprite_class in (SpriteClass.SPAWN_POINT, SpriteClass.BOMBER,
-                                SpriteClass.SPREADER):
-            if sd.spawner_stype:
-                for idx in game_def.resolve_stype(sd.spawner_stype):
-                    spawn_targets.add(idx)
+        # Any sprite with spawner_stype can dynamically create sprites:
+        # SpawnPoint, Bomber, Spreader for NPC spawning, and avatar types
+        # (ShootAvatar, FlakAvatar, etc.) for projectile spawning.
+        if sd.spawner_stype:
+            for idx in game_def.resolve_stype(sd.spawner_stype):
+                spawn_targets.add(idx)
 
     FORCE_MOVE_EFFECTS = {
         'bounce_forward', 'pull_with_it', 'convey_sprite',
