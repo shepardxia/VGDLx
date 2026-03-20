@@ -136,7 +136,7 @@ def render_pygame(state, game_def, surfaces, static_grid_map, block_size, height
 
 # ── Main game loop ─────────────────────────────────────────────────
 
-def play(env, game_def, scale=2, fps=15):
+def play(env, game_def, scale=2, fps=30):
     """Run the interactive game loop."""
     from vgdl_jax.data_model import get_block_size
     block_size = get_block_size(game_def)
@@ -183,7 +183,8 @@ def play(env, game_def, scale=2, fps=15):
 
         pygame.display.flip()
 
-        # Handle input — check held keys for continuous movement
+        # Handle input — event queue catches every keypress
+        queued_action = None
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -195,14 +196,19 @@ def play(env, game_def, scale=2, fps=15):
                     obs, state = env.reset(key)
                     step_count = 0
                     total_reward = 0
+                elif event.key in key_map:
+                    queued_action = key_map[event.key]
 
-        # Read held keys — game steps every frame (NPCs move even without input)
-        action = env.noop_action  # default NOOP
-        keys_pressed = pygame.key.get_pressed()
-        for pygame_key, act_idx in key_map.items():
-            if keys_pressed[pygame_key]:
-                action = act_idx
-                break  # first held key wins
+        # Use queued keydown event if available, else check held keys, else NOOP
+        if queued_action is not None:
+            action = queued_action
+        else:
+            action = env.noop_action
+            keys_pressed = pygame.key.get_pressed()
+            for pygame_key, act_idx in key_map.items():
+                if keys_pressed[pygame_key]:
+                    action = act_idx
+                    break
 
         # Step every frame (not just on keypress)
         if not state.done:
